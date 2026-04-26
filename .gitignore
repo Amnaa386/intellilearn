@@ -4,6 +4,10 @@
 intellilearn-backend/.env
 intellilearn-backend/firebase-service-account.json
 intellilearn-backend/*firebase-adminsdk*.json
+AI Tutor/backend/.env
+AI Tutor/backend/.env.*
+Intellilearn(FRONTEND)/.env
+Intellilearn(FRONTEND)/.env.*
 
 # Python artifacts
 intellilearn-backend/.venv/
