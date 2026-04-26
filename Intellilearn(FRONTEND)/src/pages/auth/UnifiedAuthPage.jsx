@@ -1,9 +1,9 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { signInWithPopup } from 'firebase/auth';
+import { getRedirectResult, signInWithPopup, signInWithRedirect } from 'firebase/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -253,31 +253,63 @@ export default function UnifiedAuthPage() {
     window.dispatchEvent(new Event('intellilearn-user-updated'));
   };
 
+  const completeGoogleAuth = async (cred) => {
+    const idToken = await cred.user.getIdToken();
+    const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+    const response = await fetch(`${apiBase}/api/auth/google-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id_token: idToken }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || 'Google login failed');
+    }
+
+    const payload = await response.json();
+    persistSessionFromBackend(payload, cred?.user?.photoURL || '');
+    navigate('/dashboard/student', { replace: true });
+  };
+
+  useEffect(() => {
+    const processRedirectAuth = async () => {
+      try {
+        const { auth } = getGoogleAuth();
+        const redirectResult = await getRedirectResult(auth);
+        if (!redirectResult?.user) return;
+        setLoadingGoogle(true);
+        await completeGoogleAuth(redirectResult);
+      } catch (error) {
+        setAuthError(error?.message || 'Google sign-in failed. Please try again.');
+      } finally {
+        setLoadingGoogle(false);
+      }
+    };
+
+    processRedirectAuth();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleGoogleAuth = async () => {
+    const { auth, googleProvider } = getGoogleAuth();
     try {
       setSignupError('');
       setAuthError('');
-      const { auth, googleProvider } = getGoogleAuth();
       setLoadingGoogle(true);
       const cred = await signInWithPopup(auth, googleProvider);
-      const idToken = await cred.user.getIdToken();
-      const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
-      const response = await fetch(`${apiBase}/api/auth/google-login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id_token: idToken }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.detail || 'Google login failed');
-      }
-
-      const payload = await response.json();
-      persistSessionFromBackend(payload, cred?.user?.photoURL || '');
-      navigate('/dashboard/student', { replace: true });
+      await completeGoogleAuth(cred);
     } catch (error) {
-      setAuthError(error?.message || 'Google sign-in failed. Please try again.');
+      if (error?.code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectErr) {
+          setAuthError(redirectErr?.message || 'Google sign-in blocked by browser.');
+        }
+      } else {
+        setAuthError(error?.message || 'Google sign-in failed. Please try again.');
+      }
     } finally {
       setLoadingGoogle(false);
     }

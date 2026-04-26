@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.security import HTTPBearer
 from app.models.chat import AIRequest, AIResponse, ChatSessionResponse, ChatSessionWithMessages, MessageCreate, PPTExplainRequest, VoiceLessonRequest
 from app.services.chat_service import chat_service
+from app.services.ai_service import AIRateLimitError
 from app.core.security import get_current_user
 from app.core.redis import increment_rate_limit
 import logging
@@ -44,6 +45,11 @@ async def ask_ai(request: AIRequest, current_user: dict = Depends(get_current_us
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except AIRateLimitError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=str(e)
         )
     except Exception as e:

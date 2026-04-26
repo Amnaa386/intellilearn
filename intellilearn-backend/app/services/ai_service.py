@@ -10,6 +10,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+class AIRateLimitError(RuntimeError):
+    """Raised when configured AI provider is temporarily rate-limited."""
+    pass
+
 class AIService:
     def __init__(self):
         self.has_groq = bool(settings.GROQ_API_KEY)
@@ -31,6 +36,9 @@ class AIService:
         """Call Groq first (free-friendly), fallback to OpenAI."""
         if self.has_groq:
             try:
+                # Keep request lighter for free-tier TPM limits.
+                effective_messages = messages[-8:] if len(messages) > 8 else messages
+                safe_max_tokens = min(max_tokens, 600)
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
                         "https://api.groq.com/openai/v1/chat/completions",
@@ -40,15 +48,19 @@ class AIService:
                         },
                         json={
                             "model": settings.GROQ_MODEL,
-                            "messages": messages,
-                            "max_tokens": max_tokens,
+                            "messages": effective_messages,
+                            "max_tokens": safe_max_tokens,
                             "temperature": temperature,
                         },
                     )
                 if resp.status_code >= 400:
+                    if resp.status_code == 429:
+                        raise AIRateLimitError("Groq rate limit reached. Please retry in a few seconds.")
                     raise RuntimeError(f"Groq error {resp.status_code}: {resp.text}")
                 return "groq", resp.json()
             except Exception as e:
+                if isinstance(e, AIRateLimitError) and not self.has_openai:
+                    raise
                 logger.warning(f"Groq failed, trying OpenAI fallback: {e}")
 
         if self.has_openai:
@@ -62,6 +74,8 @@ class AIService:
             )
             return "openai", response
 
+        if self.has_groq and not self.has_openai:
+            raise AIRateLimitError("AI is temporarily busy due to rate limits. Please retry in 3-5 seconds.")
         raise RuntimeError("No AI provider configured. Set GROQ_API_KEY or OPENAI_API_KEY.")
     
     async def generate_chat_response(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -2,7 +2,9 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { User, Cpu } from 'lucide-react';
+import { Cpu } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import StructuredLessonMessage from './StructuredLessonMessage';
 import { cn } from '@/lib/utils';
 
@@ -19,6 +21,46 @@ function formatMsgTime(ts) {
 export default function MessageBubble({ message, isDarkMode = true }) {
   const isUser = message.type === 'user';
   const hasPack = Boolean(message.learningPack);
+  const [userName, setUserName] = React.useState('');
+  const [userAvatar, setUserAvatar] = React.useState('');
+
+  const sanitizeAvatar = React.useCallback((avatar) => {
+    if (typeof avatar !== 'string') return '';
+    const trimmed = avatar.trim();
+    if (!trimmed || trimmed === 'undefined' || trimmed === 'null') return '';
+    if (!trimmed.startsWith('http') && !trimmed.startsWith('data:image/')) return '';
+    return trimmed;
+  }, []);
+
+  const getInitials = React.useCallback((name = '') => {
+    const parts = String(name).trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return 'U';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  }, []);
+
+  React.useEffect(() => {
+    const hydrateUser = () => {
+      try {
+        const raw = localStorage.getItem('intellilearn_user');
+        if (!raw) {
+          setUserName('');
+          setUserAvatar('');
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        setUserName(parsed?.name || '');
+        setUserAvatar(sanitizeAvatar(parsed?.profile?.avatar));
+      } catch {
+        setUserName('');
+        setUserAvatar('');
+      }
+    };
+
+    hydrateUser();
+    window.addEventListener('intellilearn-user-updated', hydrateUser);
+    return () => window.removeEventListener('intellilearn-user-updated', hydrateUser);
+  }, [sanitizeAvatar]);
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -41,8 +83,15 @@ export default function MessageBubble({ message, isDarkMode = true }) {
                 : 'bg-gradient-to-br from-slate-200 to-slate-100 border border-slate-300'
           }`}
         >
-          {isUser ? (
-            <User className="w-4 h-4 text-white" />
+          {isUser ? userAvatar ? (
+            <img
+              src={userAvatar}
+              alt={userName || 'User'}
+              className="h-full w-full rounded-full object-cover"
+              onError={() => setUserAvatar('')}
+            />
+          ) : (
+            <span className="text-[10px] font-bold text-white">{getInitials(userName)}</span>
           ) : (
             <Cpu className={`w-4 h-4 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`} />
           )}
@@ -61,7 +110,29 @@ export default function MessageBubble({ message, isDarkMode = true }) {
           )}
         >
           {message.content ? (
-            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.content}</p>
+            isUser ? (
+              <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.content}</p>
+            ) : (
+              <div className="break-words text-sm leading-relaxed">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                    ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+                    ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+                    li: ({ children }) => <li>{children}</li>,
+                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                    code: ({ children }) => (
+                      <code className={`rounded px-1.5 py-0.5 ${isDarkMode ? 'bg-slate-700/70 text-sky-200' : 'bg-slate-100 text-slate-800'}`}>
+                        {children}
+                      </code>
+                    ),
+                  }}
+                >
+                  {message.content}
+                </ReactMarkdown>
+              </div>
+            )
           ) : null}
           {hasPack ? (
             <div className={cn(message.content ? `mt-4 border-t ${isDarkMode ? 'border-slate-600/50' : 'border-slate-200'} pt-4` : '')}>

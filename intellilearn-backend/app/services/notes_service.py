@@ -57,6 +57,37 @@ class NotesService:
         except Exception as e:
             logger.error(f"Error generating notes: {e}")
             raise
+
+    async def create_note(self, user_id: str, note_data: NotesCreate) -> NotesResponse:
+        """Create a note from provided content (e.g. chat summary notes)."""
+        try:
+            notes_id = str(uuid4())
+            notes_doc = {
+                "id": notes_id,
+                "userId": user_id,
+                "title": note_data.title,
+                "content": note_data.content,
+                "category": note_data.category.value,
+                "type": note_data.type.value,
+                "tags": note_data.tags or [],
+                "topic": note_data.topic,
+                "bookmarked": note_data.bookmarked,
+                "generatedAt": datetime.utcnow()
+            }
+
+            db = self._require_db()
+            db.collection("notes").document(notes_id).set(notes_doc)
+
+            await self._log_activity("notes_created_manual", user_id, {
+                "notesId": notes_id,
+                "topic": note_data.topic,
+                "type": note_data.type.value
+            })
+
+            return NotesResponse(**notes_doc)
+        except Exception as e:
+            logger.error(f"Error creating note: {e}")
+            raise
     
     async def get_user_notes(self, user_id: str, page: int = 1, limit: int = 20, 
                            category: Optional[NotesCategory] = None, bookmarked: Optional[bool] = None,

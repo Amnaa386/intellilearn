@@ -9,6 +9,7 @@ from app.core.redis import set_cache, get_cache, delete_cache
 from app.models.user import UserCreate, UserInDB, UserResponse
 
 logger = logging.getLogger(__name__)
+GOOGLE_TOKEN_CLOCK_SKEW_SECONDS = 10
 
 class AuthService:
     @staticmethod
@@ -158,7 +159,10 @@ class AuthService:
         """Authenticate (or auto-register) user from Google/Firebase ID token."""
         try:
             db = self._require_db()
-            decoded = firebase_auth.verify_id_token(id_token)
+            decoded = firebase_auth.verify_id_token(
+                id_token,
+                clock_skew_seconds=GOOGLE_TOKEN_CLOCK_SKEW_SECONDS,
+            )
             firebase_uid = decoded.get("uid")
             email = decoded.get("email")
 
@@ -227,6 +231,13 @@ class AuthService:
                 "user": user_response.model_dump(),
                 "tokens": tokens
             }
+        except (
+            firebase_auth.InvalidIdTokenError,
+            firebase_auth.ExpiredIdTokenError,
+            firebase_auth.RevokedIdTokenError,
+        ) as e:
+            logger.warning(f"Google token validation failed: {e}")
+            raise ValueError("Invalid or expired Google token")
         except Exception as e:
             logger.error(f"Error authenticating Google user: {e}")
             raise

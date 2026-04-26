@@ -9,6 +9,24 @@ import { createTutorSession, deleteTutorSession, getTutorSession, getTutorSessio
 
 const ACTIVE_SESSION_KEY = 'intellilearn_active_chat_session_id';
 
+const toTs = (value) => {
+  if (!value) return 0;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
+};
+
+const sortSessions = (list = [], activeId = null) => {
+  const copy = [...list];
+  copy.sort((a, b) => {
+    const aId = a?.id || a?.sessionId;
+    const bId = b?.id || b?.sessionId;
+    if (activeId && aId === activeId && bId !== activeId) return -1;
+    if (activeId && bId === activeId && aId !== activeId) return 1;
+    return toTs(b?.updatedAt) - toTs(a?.updatedAt);
+  });
+  return copy;
+};
+
 export default function TutorPage() {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [messages, setMessages] = useState([]);
@@ -69,7 +87,8 @@ export default function TutorPage() {
     try {
       setSessionsLoading(true);
       const data = await getTutorSessions(1, 30);
-      setSessions(Array.isArray(data) ? data : []);
+      const incoming = Array.isArray(data) ? data : [];
+      setSessions(sortSessions(incoming, sessionIdRef.current));
     } catch {
       setSessions([]);
     } finally {
@@ -117,6 +136,7 @@ export default function TutorPage() {
           timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
         })),
       );
+      setSessions((prev) => sortSessions(prev, id));
       setAutoTitleNextMessage(false);
     } catch {
       setMessages([]);
@@ -174,7 +194,7 @@ export default function TutorPage() {
             ) : sessions.length === 0 ? (
               <p className={`text-xs ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>No chat sessions yet.</p>
             ) : (
-              sessions.map((s) => {
+              sortSessions(sessions, sessionIdRef.current).map((s) => {
                 const sid = s.id || s.sessionId;
                 const active = sid && sid === sessionIdRef.current;
                 return (

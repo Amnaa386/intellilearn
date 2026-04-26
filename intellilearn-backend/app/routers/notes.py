@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from fastapi.security import HTTPBearer
-from app.models.notes import NotesGenerateRequest, NotesResponse, NotesCategory, NotesType
+from app.models.notes import NotesGenerateRequest, NotesResponse, NotesCategory, NotesType, NotesCreate
 from app.services.notes_service import notes_service
 from app.core.security import get_current_user
 from app.core.redis import increment_rate_limit
@@ -39,6 +39,22 @@ async def generate_notes(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate notes"
+        )
+
+@router.post("/", response_model=NotesResponse, status_code=status.HTTP_201_CREATED)
+async def create_note(
+    request: NotesCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create and persist a note from provided content."""
+    try:
+        note = await notes_service.create_note(current_user["id"], request)
+        return note
+    except Exception as e:
+        logger.error(f"Error creating note: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create note"
         )
 
 @router.get("/")

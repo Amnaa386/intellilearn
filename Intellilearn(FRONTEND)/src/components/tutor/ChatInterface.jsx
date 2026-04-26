@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import MessageBubble from './MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,8 +12,10 @@ import { askTutor, autoTitleTutorSession, updateTutorSessionTitle } from '@/lib/
 export default function ChatInterface({ messages, setMessages, isDarkMode = true, sessionIdRef, autoTitleNextMessage = false, onAutoTitleConsumed = null }) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
   const [apiError, setApiError] = useState('');
   const messagesEndRef = useRef(null);
+  const navigate = useNavigate();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -21,6 +24,62 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  const handleGenerateNotesFromChat = async () => {
+    if (messages.length < 2 || isGeneratingNotes) return;
+    try {
+      setApiError('');
+      setIsGeneratingNotes(true);
+      const convo = messages
+        .filter((m) => m?.content)
+        .slice(-8)
+        .map((m) => {
+          const text = (m.content || '').replace(/\s+/g, ' ').trim();
+          const compact = text.length > 220 ? `${text.slice(0, 220)}...` : text;
+          return `${m.type === 'user' ? 'Student' : 'Tutor'}: ${compact}`;
+        })
+        .join('\n\n');
+
+      let prompt = `Create concise study notes from this tutor conversation.
+Return clear markdown with headings:
+- Topic
+- Key concepts
+- Important points
+- Quick revision bullets
+- 5 short practice questions
+
+Conversation:
+${convo}`;
+
+      // Backend AIRequest.message max_length is 2000, keep a safe margin.
+      const MAX_PROMPT_LEN = 1800;
+      if (prompt.length > MAX_PROMPT_LEN) {
+        prompt = `${prompt.slice(0, MAX_PROMPT_LEN)}...`;
+      }
+
+      const ai = await askTutor(prompt, sessionIdRef?.current || null);
+      const notesContent = ai?.message || '';
+      if (!notesContent.trim()) {
+        throw new Error('Unable to generate notes from conversation.');
+      }
+
+      const firstUser = messages.find((m) => m.type === 'user')?.content || 'Tutor Conversation';
+      const topic = firstUser.length > 80 ? `${firstUser.slice(0, 80).trim()}...` : firstUser;
+
+      navigate('/dashboard/student/notes', {
+        state: {
+          generatedTopic: topic,
+          fromChatSessionId: sessionIdRef?.current || null,
+          generatedNotesContent: notesContent,
+          type: 'detailed',
+        },
+      });
+    } catch (err) {
+      setApiError(err?.message || 'Failed to generate notes from chat.');
+    } finally {
+      setIsGeneratingNotes(false);
+    }
+  };
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
@@ -197,6 +256,16 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
               className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}
             >
               <Mic className="w-4 h-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={messages.length < 2 || isGeneratingNotes}
+              onClick={handleGenerateNotesFromChat}
+              className={isDarkMode ? 'border-slate-600 text-slate-300 hover:bg-slate-800/50' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}
+            >
+              <FileText className="w-4 h-4 mr-2" />
+              {isGeneratingNotes ? 'Generating Notes...' : 'Generate Notes'}
             </Button>
           </div>
 
