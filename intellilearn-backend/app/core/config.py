@@ -9,8 +9,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
     
-    # Database
-    MONGODB_URI: str = "mongodb://localhost:27017/intellilearn"
+    # Database (Firebase / Firestore)
+    FIREBASE_PROJECT_ID: str = ""
+    FIREBASE_CREDENTIALS_PATH: str = ""
+    FIREBASE_CREDENTIALS_JSON: str = ""
     REDIS_URL: str = "redis://localhost:6379"
     
     # JWT
@@ -23,11 +25,17 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     
+    # Groq (free-tier friendly, same as old AI Tutor flow)
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+    
     # CORS
     ALLOWED_ORIGINS: List[str] = [
         "http://localhost:5173",
+        "http://localhost:5174",
         "http://localhost:3000", 
-        "http://127.0.0.1:5173"
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174"
     ]
     
     # File Upload

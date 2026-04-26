@@ -1,2 +1,12 @@
 ./node_modules
 
+# Backend secrets
+intellilearn-backend/.env
+intellilearn-backend/firebase-service-account.json
+intellilearn-backend/*firebase-adminsdk*.json
+
+# Python artifacts
+intellilearn-backend/.venv/
+**/__pycache__/
+*.pyc
+

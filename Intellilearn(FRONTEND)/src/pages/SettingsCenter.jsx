@@ -6,6 +6,7 @@ import { Bell, Lock, ShieldCheck, SlidersHorizontal, UserCircle2 } from 'lucide-
 export default function SettingsCenter() {
   const role = localStorage.getItem('intellilearn_role') || 'student';
   const dashboardPath = role === 'admin' ? '/dashboard/admin/overview' : '/dashboard/student';
+  const profileSettingsPath = role === 'admin' ? '/settings/detailed' : '/dashboard/student/settings';
 
   const settingCards = useMemo(
     () => [
@@ -13,24 +14,28 @@ export default function SettingsCenter() {
         title: 'Profile Settings',
         description: 'Update your display name, email, and account information.',
         icon: UserCircle2,
+        href: profileSettingsPath,
       },
       {
         title: 'Security',
         description: 'Manage password, account safety, and access preferences.',
         icon: Lock,
+        href: '/settings/detailed',
       },
       {
         title: 'Notifications',
         description: 'Control reminders, updates, and communication preferences.',
         icon: Bell,
+        href: '/settings/detailed',
       },
       {
         title: 'System Preferences',
         description: 'Customize platform behavior and interface preferences.',
         icon: SlidersHorizontal,
+        href: '/settings/detailed',
       },
     ],
-    [],
+    [profileSettingsPath],
   );
 
   return (
@@ -68,13 +73,17 @@ export default function SettingsCenter() {
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {settingCards.map((item) => (
-            <div key={item.title} className="rounded-2xl border border-slate-700 bg-slate-900/55 p-5">
+            <Link
+              key={item.title}
+              to={item.href}
+              className="rounded-2xl border border-slate-700 bg-slate-900/55 p-5 transition-colors hover:border-blue-500/40 hover:bg-slate-900/75"
+            >
               <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-slate-800">
                 <item.icon className="h-5 w-5 text-blue-400" />
               </div>
               <h2 className="text-lg font-semibold text-white">{item.title}</h2>
               <p className="mt-1 text-sm text-slate-400">{item.description}</p>
-            </div>
+            </Link>
           ))}
         </div>
       </motion.div>

@@ -167,6 +167,31 @@ async def update_session_title(
             detail="Failed to update session title"
         )
 
+@router.post("/sessions/{session_id}/title/auto")
+async def auto_title_session(
+    session_id: str,
+    payload: dict = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Auto-generate chat title from first/seed user message."""
+    try:
+        seed_text = (payload or {}).get("seedText", "")
+        title = await chat_service.auto_generate_session_title(current_user["id"], session_id, seed_text)
+        if not title:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Unable to generate title for this session"
+            )
+        return {"success": True, "title": title}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error auto-titling session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to auto-generate session title"
+        )
+
 @router.get("/stats")
 async def get_chat_stats(current_user: dict = Depends(get_current_user)):
     """Get user's chat statistics"""

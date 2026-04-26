@@ -6,15 +6,63 @@ from app.core.config import settings
 from app.core.redis import set_cache, get_cache
 import json
 import hashlib
+import httpx
 
 logger = logging.getLogger(__name__)
 
 class AIService:
     def __init__(self):
+        self.has_groq = bool(settings.GROQ_API_KEY)
+        self.has_openai = bool(settings.OPENAI_API_KEY)
+
         if settings.OPENAI_API_KEY:
             openai.api_key = settings.OPENAI_API_KEY
-        else:
+        elif not self.has_groq:
             logger.warning("OpenAI API key not configured")
+        
+        if self.has_groq:
+            logger.info("AI provider priority: Groq -> OpenAI fallback")
+        elif self.has_openai:
+            logger.info("AI provider: OpenAI")
+        else:
+            logger.warning("No AI provider key configured (Groq/OpenAI)")
+
+    async def _chat_completion(self, messages: List[Dict[str, str]], max_tokens: int = 1000, temperature: float = 0.7):
+        """Call Groq first (free-friendly), fallback to OpenAI."""
+        if self.has_groq:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": settings.GROQ_MODEL,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                        },
+                    )
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Groq error {resp.status_code}: {resp.text}")
+                return "groq", resp.json()
+            except Exception as e:
+                logger.warning(f"Groq failed, trying OpenAI fallback: {e}")
+
+        if self.has_openai:
+            response = await openai.ChatCompletion.acreate(
+                model=settings.OPENAI_MODEL,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                presence_penalty=0.1,
+                frequency_penalty=0.1
+            )
+            return "openai", response
+
+        raise RuntimeError("No AI provider configured. Set GROQ_API_KEY or OPENAI_API_KEY.")
     
     async def generate_chat_response(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Generate AI chat response using OpenAI"""
@@ -55,26 +103,29 @@ class AIService:
                 "content": message
             })
             
-            # Call OpenAI API
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=1000,
-                temperature=0.7,
-                presence_penalty=0.1,
-                frequency_penalty=0.1
-            )
+            provider, response = await self._chat_completion(messages, max_tokens=1000, temperature=0.7)
             
-            ai_message = response.choices[0].message.content
-            usage = response.usage
+            if provider == "groq":
+                ai_message = response["choices"][0]["message"]["content"]
+                usage = response.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            else:
+                ai_message = response.choices[0].message.content
+                usage = response.usage
+                prompt_tokens = usage.prompt_tokens
+                completion_tokens = usage.completion_tokens
+                total_tokens = usage.total_tokens
             
             result = {
                 "message": ai_message,
                 "usage": {
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens
-                }
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
+                },
             }
             
             # Cache the response

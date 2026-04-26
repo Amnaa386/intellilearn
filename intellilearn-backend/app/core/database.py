@@ -1,80 +1,48 @@
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ASCENDING, DESCENDING
-from app.core.config import settings
+import json
 import logging
+from firebase_admin import credentials, firestore, initialize_app
+import firebase_admin
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Database client
-client: AsyncIOMotorClient = None
+# Firestore client
 database = None
 
-async def connect_to_mongodb():
-    """Connect to MongoDB"""
-    global client, database
+async def connect_to_database():
+    """Connect to Firestore using Firebase Admin SDK."""
+    global database
     try:
-        client = AsyncIOMotorClient(settings.MONGODB_URI)
-        database = client.intellilearn
-        
-        # Test connection
-        await client.server_info()
-        logger.info("Connected to MongoDB successfully")
-        
-        # Create indexes for better performance
-        await create_indexes()
-        
+        if settings.FIREBASE_CREDENTIALS_JSON:
+            cred_info = json.loads(settings.FIREBASE_CREDENTIALS_JSON)
+            cred = credentials.Certificate(cred_info)
+        elif settings.FIREBASE_CREDENTIALS_PATH:
+            cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+        else:
+            raise ValueError(
+                "Firebase credentials not configured. Set FIREBASE_CREDENTIALS_PATH or FIREBASE_CREDENTIALS_JSON."
+            )
+
+        if not firebase_admin._apps:
+            init_kwargs = {"credential": cred}
+            if settings.FIREBASE_PROJECT_ID:
+                init_kwargs["options"] = {"projectId": settings.FIREBASE_PROJECT_ID}
+            initialize_app(**init_kwargs)
+
+        database = firestore.client()
+
+        # Connection check
+        list(database.collections())
+        logger.info("Connected to Firestore successfully")
     except Exception as e:
-        logger.warning(f"Failed to connect to MongoDB: {e}")
+        logger.warning(f"Failed to connect to Firestore: {e}")
         logger.info("Application will continue without database connection")
-        # Don't raise error - allow app to start without MongoDB for development
-        client = None
         database = None
 
-async def close_mongodb_connection():
-    """Close MongoDB connection"""
-    global client
-    if client:
-        client.close()
-        logger.info("MongoDB connection closed")
-
-async def create_indexes():
-    """Create database indexes"""
-    try:
-        # Users collection indexes
-        await database.users.create_index("email", unique=True)
-        await database.users.create_index("role")
-        await database.users.create_index("status")
-        await database.users.create_index("createdAt")
-        
-        # Chat sessions indexes
-        await database.chat_sessions.create_index([("userId", ASCENDING), ("createdAt", DESCENDING)])
-        await database.chat_sessions.create_index("sessionId", unique=True)
-        
-        # Messages indexes
-        await database.messages.create_index([("sessionId", ASCENDING), ("timestamp", ASCENDING)])
-        
-        # Notes indexes
-        await database.notes.create_index([("userId", ASCENDING), ("createdAt", DESCENDING)])
-        await database.notes.create_index([("userId", ASCENDING), ("bookmarked", ASCENDING)])
-        await database.notes.create_index("topic")
-        
-        # Quizzes indexes
-        await database.quizzes.create_index([("userId", ASCENDING), ("createdAt", DESCENDING)])
-        await database.quizzes.create_index([("userId", ASCENDING), ("completedAt", DESCENDING)])
-        
-        # Analytics indexes
-        await database.analytics.create_index([("userId", ASCENDING), ("timestamp", DESCENDING)])
-        await database.analytics.create_index([("type", ASCENDING), ("timestamp", DESCENDING)])
-        
-        # Activity logs indexes
-        await database.activity_logs.create_index([("timestamp", DESCENDING)])
-        await database.activity_logs.create_index([("userId", ASCENDING), ("timestamp", DESCENDING)])
-        
-        logger.info("Database indexes created successfully")
-        
-    except Exception as e:
-        logger.error(f"Failed to create indexes: {e}")
+async def close_database_connection():
+    """Close Firestore connection (no-op for firebase-admin)."""
+    logger.info("Firestore connection closed")
 
 def get_database():
-    """Get database instance"""
+    """Get Firestore client instance."""
     return database

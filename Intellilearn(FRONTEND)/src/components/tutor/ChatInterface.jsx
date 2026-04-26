@@ -2,15 +2,16 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Paperclip, Mic } from 'lucide-react';
+import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation } from 'lucide-react';
 import MessageBubble from './MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { analyzeLearningRequest, generateLearningPack } from '@/lib/tutorLearningPack';
+import { askTutor, autoTitleTutorSession, updateTutorSessionTitle } from '@/lib/tutorApi';
 
-export default function ChatInterface({ messages, setMessages }) {
+export default function ChatInterface({ messages, setMessages, isDarkMode = true, sessionIdRef, autoTitleNextMessage = false, onAutoTitleConsumed = null }) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState('');
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -24,6 +25,8 @@ export default function ChatInterface({ messages, setMessages }) {
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
+    const outgoingText = input.trim();
+    const hadExistingSession = Boolean(sessionIdRef?.current);
 
     // Add user message
     const userMessage = {
@@ -36,36 +39,102 @@ export default function ChatInterface({ messages, setMessages }) {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsLoading(true);
+    setApiError('');
 
-    const intent = analyzeLearningRequest(input);
-    const pack = generateLearningPack(input, intent);
+    try {
+      const data = await askTutor(outgoingText, sessionIdRef?.current || null);
+      if (data?.sessionId && sessionIdRef) {
+        sessionIdRef.current = data.sessionId;
+        try {
+          sessionStorage.setItem('intellilearn_active_chat_session_id', data.sessionId);
+        } catch {
+          // no-op if storage unavailable
+        }
 
-    window.setTimeout(() => {
+        // ChatGPT-style behavior: first user message becomes session title.
+        if (!hadExistingSession) {
+          const title = outgoingText.length > 36 ? `${outgoingText.slice(0, 36).trim()}...` : outgoingText;
+          try {
+            await updateTutorSessionTitle(data.sessionId, title || 'New Chat');
+          } catch {
+            // Keep chat usable even if title update fails.
+          }
+        }
+
+        if (!hadExistingSession || autoTitleNextMessage) {
+          try {
+            await autoTitleTutorSession(data.sessionId, outgoingText);
+          } catch {
+            // Non-critical: default title already exists.
+          } finally {
+            if (typeof onAutoTitleConsumed === 'function') onAutoTitleConsumed();
+          }
+        }
+      }
+
       const botMessage = {
-        id: (Date.now() + 1).toString(),
+        id: data.messageId || (Date.now() + 1).toString(),
         type: 'bot',
-        content: `Structured module for **${intent.topicDisplay}**. Counts follow your wording (e.g. more MCQs, exam prep, notes only). Refine your next message to expand any section.`,
-        learningPack: pack,
-        timestamp: new Date(),
+        content: data.message || 'No response returned by AI.',
+        timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
       };
       setMessages((prev) => [...prev, botMessage]);
+    } catch (err) {
+      setApiError(err?.message || 'Unable to reach AI backend');
+    } finally {
       setIsLoading(false);
-    }, 1200);
+    }
   };
 
   return (
-    <div className="flex flex-col h-full rounded-xl bg-gradient-to-br from-slate-800/50 to-slate-900/50 border border-slate-700/50 overflow-hidden">
+    <div className={`flex flex-col h-full rounded-xl overflow-hidden border ${isDarkMode ? 'bg-gradient-to-br from-slate-800/50 to-slate-900/50 border-slate-700/50' : 'bg-white border-slate-200 shadow-sm'}`}>
       {/* Header */}
-      <div className="p-6 border-b border-slate-700/50 bg-gradient-to-r from-slate-800/50 to-slate-900/50">
-        <h1 className="text-2xl font-bold text-slate-100">Intelli AI Tutor</h1>
-        <p className="text-sm text-slate-400 mt-1">
+      <div className={`p-6 border-b ${isDarkMode ? 'border-slate-700/50 bg-gradient-to-r from-slate-800/50 to-slate-900/50' : 'border-slate-200 bg-slate-50'}`}>
+        <h1 className={`text-2xl font-bold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>Intelli AI Tutor</h1>
+        <p className={`text-sm mt-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
           Enter a topic or exam brief — you&apos;ll get animated notes, MCQs, and questions. Try &quot;8 MCQs on…&quot; or
           &quot;notes only&quot; to steer the layout.
         </p>
+        {apiError ? (
+          <p className="mt-2 text-xs text-amber-500">{apiError}</p>
+        ) : null}
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+      <div className={`flex-1 overflow-y-auto p-6 space-y-4 ${isDarkMode ? 'scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent' : ''}`}>
+        {messages.length === 0 && !isLoading ? (
+          <div className="h-full min-h-[320px] flex items-center justify-center">
+            <div className="w-full max-w-3xl text-center">
+              <div className="mb-5 inline-flex items-center justify-center">
+                <HelpCircle className={`w-14 h-14 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`} />
+              </div>
+              <h2 className={`text-4xl font-bold tracking-tight ${isDarkMode ? 'text-slate-100' : 'text-slate-800'}`}>
+                Welcome to AI Learning Platform
+              </h2>
+              <p className={`mt-3 text-lg ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                Start a conversation by asking a question, requesting notes, or generating a quiz. I&apos;ll help you learn any topic!
+              </p>
+              <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {[
+                  { icon: Sparkles, label: 'Explain photosynthesis', text: 'Explain photosynthesis' },
+                  { icon: FileText, label: 'Create notes on World War II', text: 'Create notes on World War II' },
+                  { icon: HelpCircle, label: 'Generate a math quiz', text: 'Generate a math quiz' },
+                  { icon: Presentation, label: 'Make a presentation on climate change', text: 'Make a presentation on climate change' },
+                ].map((item) => (
+                  <button
+                    key={item.label}
+                    onClick={() => setInput(item.text)}
+                    className={`flex items-center gap-2 rounded-xl border px-4 py-3 text-left text-base transition ${isDarkMode ? 'border-slate-700 bg-slate-900/50 text-slate-200 hover:border-blue-500/50' : 'border-slate-200 bg-white text-slate-700 hover:border-blue-300'}`}
+                  >
+                    <item.icon className="w-4 h-4 text-blue-400" />
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <AnimatePresence initial={false}>
           {messages.map((message, idx) => (
             <motion.div
@@ -75,7 +144,7 @@ export default function ChatInterface({ messages, setMessages }) {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.3 }}
             >
-              <MessageBubble message={message} />
+              <MessageBubble message={message} isDarkMode={isDarkMode} />
             </motion.div>
           ))}
 
@@ -85,7 +154,7 @@ export default function ChatInterface({ messages, setMessages }) {
               animate={{ opacity: 1, y: 0 }}
               className="flex justify-start"
             >
-              <div className="max-w-xs p-4 rounded-lg bg-slate-800/50 border border-slate-700/50">
+              <div className={`max-w-xs p-4 rounded-lg border ${isDarkMode ? 'bg-slate-800/50 border-slate-700/50' : 'bg-slate-50 border-slate-200'}`}>
                 <div className="flex gap-2">
                   <motion.div
                     className="w-3 h-3 rounded-full bg-blue-500"
@@ -111,21 +180,21 @@ export default function ChatInterface({ messages, setMessages }) {
       </div>
 
       {/* Input Area */}
-      <div className="p-6 border-t border-slate-700/50 bg-gradient-to-t from-slate-900/50 to-transparent">
+      <div className={`p-6 border-t ${isDarkMode ? 'border-slate-700/50 bg-gradient-to-t from-slate-900/50 to-transparent' : 'border-slate-200 bg-white'}`}>
         <form onSubmit={handleSendMessage} className="space-y-3">
           {/* Toolbar */}
           <div className="flex gap-2">
             <Button
               size="icon"
               variant="outline"
-              className="border-slate-600 text-slate-400 hover:bg-slate-800/50"
+              className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}
             >
               <Paperclip className="w-4 h-4" />
             </Button>
             <Button
               size="icon"
               variant="outline"
-              className="border-slate-600 text-slate-400 hover:bg-slate-800/50"
+              className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}
             >
               <Mic className="w-4 h-4" />
             </Button>
@@ -139,7 +208,7 @@ export default function ChatInterface({ messages, setMessages }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               disabled={isLoading}
-              className="bg-slate-800/50 border-slate-700/50 text-slate-100 placeholder:text-slate-500"
+              className={isDarkMode ? 'bg-slate-800/50 border-slate-700/50 text-slate-100 placeholder:text-slate-500' : 'bg-white border-slate-300 text-slate-900 placeholder:text-slate-400'}
             />
             <Button
               type="submit"
@@ -168,7 +237,7 @@ export default function ChatInterface({ messages, setMessages }) {
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
               onClick={() => setInput((prev) => (prev.trim() ? `${chip.text}${prev.trim()}` : `${chip.text}`))}
-              className="rounded-lg border border-slate-700/50 bg-slate-800/50 p-2 text-left text-xs text-slate-300 transition-colors hover:border-blue-500/50"
+              className={`rounded-lg border p-2 text-left text-xs transition-colors ${isDarkMode ? 'border-slate-700/50 bg-slate-800/50 text-slate-300 hover:border-blue-500/50' : 'border-slate-300 bg-slate-50 text-slate-700 hover:border-blue-300'}`}
             >
               {chip.label}
             </motion.button>

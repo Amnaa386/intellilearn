@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.security import HTTPBearer
-from app.models.user import UserCreate, UserLogin, UserResponse, TokenResponse, PasswordReset, PasswordResetConfirm
+from app.models.user import UserCreate, UserLogin, GoogleLoginRequest, UserResponse, TokenResponse, PasswordReset, PasswordResetConfirm
 from app.services.auth_service import auth_service
 from app.core.redis import increment_rate_limit
 import logging
@@ -73,6 +73,36 @@ async def login(login_data: UserLogin):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Login failed. Please try again."
+        )
+
+@router.post("/google-login", response_model=TokenResponse)
+async def google_login(payload: GoogleLoginRequest):
+    """Login/signup with Google using Firebase ID token."""
+    try:
+        current, allowed = await increment_rate_limit("google_login", 20, 300)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts. Please try again later."
+            )
+
+        result = await auth_service.authenticate_google_user(payload.id_token)
+        return TokenResponse(
+            access_token=result["tokens"]["access_token"],
+            refresh_token=result["tokens"]["refresh_token"],
+            token_type=result["tokens"]["token_type"],
+            user=UserResponse(**result["user"])
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Google login error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google login failed. Please try again."
         )
 
 @router.post("/verify")

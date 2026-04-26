@@ -1,17 +1,26 @@
-from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Tuple
-from bson import ObjectId
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+from uuid import uuid4
 import logging
 from app.core.database import get_database
-from app.core.redis import set_cache, get_cache, delete_cache
 from app.services.ai_service import ai_service
-from app.models.quiz import Question, QuizResponse, QuestionType, Difficulty, QuizSource
+from app.models.quiz import QuizResponse, QuestionType, Difficulty, QuizSource
 
 logger = logging.getLogger(__name__)
 
 class QuizService:
-    def __init__(self):
-        self.db = get_database()
+    @staticmethod
+    def _require_db():
+        db = get_database()
+        if db is None:
+            raise RuntimeError("Database connection is not available")
+        return db
+
+    @staticmethod
+    def _with_id(doc_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        row = data.copy()
+        row["id"] = doc_id
+        return row
     
     async def generate_quiz(self, user_id: str, source: QuizSource = QuizSource.TOPIC, 
                            topic: Optional[str] = None, session_id: Optional[str] = None,
@@ -40,12 +49,12 @@ class QuizService:
             )
             
             # Create quiz document
-            quiz_id = str(ObjectId())
+            quiz_id = str(uuid4())
             quiz_doc = {
-                "_id": quiz_id,
+                "id": quiz_id,
                 "userId": user_id,
                 "title": ai_quiz["title"],
-                "source": source,
+                "source": source.value,
                 "sourceId": content.get("sourceId"),
                 "questions": ai_quiz["questions"],
                 "createdAt": datetime.utcnow(),
@@ -54,7 +63,8 @@ class QuizService:
                 "maxScore": len(ai_quiz["questions"]) * 10  # 10 points per question
             }
             
-            await self.db.quizzes.insert_one(quiz_doc)
+            db = self._require_db()
+            db.collection("quizzes").document(quiz_id).set(quiz_doc)
             
             # Log activity
             await self._log_activity("quiz_generated", user_id, {
@@ -72,19 +82,19 @@ class QuizService:
     async def generate_quiz_from_chat(self, user_id: str, session_id: str, mode: str = "mcq") -> QuizResponse:
         """Generate quiz from chat session (specialized)"""
         try:
-            # Get chat session content
-            session = await self.db.chat_sessions.find_one({
-                "_id": session_id,
-                "userId": user_id
-            })
+            db = self._require_db()
+            session_snapshot = db.collection("chat_sessions").document(session_id).get()
             
-            if not session:
+            if not session_snapshot.exists:
+                raise ValueError("Chat session not found")
+            session = session_snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
                 raise ValueError("Chat session not found")
             
-            # Get recent messages for context
-            messages = await self.db.messages.find(
-                {"sessionId": session_id}
-            ).sort("timestamp", -1).limit(20).to_list(length=20)
+            # Ensure messages exist for context
+            messages = list(db.collection("messages").where("sessionId", "==", session_id).stream())
+            if not messages:
+                raise ValueError("No chat messages found for this session")
             
             # Extract content from messages
             content_text = " ".join([msg["content"] for msg in messages if msg["type"] == "user"])
@@ -108,12 +118,12 @@ class QuizService:
     async def get_quiz_by_id(self, user_id: str, quiz_id: str) -> Optional[QuizResponse]:
         """Get specific quiz by ID"""
         try:
-            quiz = await self.db.quizzes.find_one({
-                "_id": quiz_id,
-                "userId": user_id
-            })
-            
-            if quiz:
+            db = self._require_db()
+            snapshot = db.collection("quizzes").document(quiz_id).get()
+            if snapshot.exists:
+                quiz = self._with_id(quiz_id, snapshot.to_dict() or {})
+                if quiz.get("userId") != user_id:
+                    return None
                 return QuizResponse(**quiz)
             return None
             
@@ -125,21 +135,18 @@ class QuizService:
                               completed: Optional[bool] = None) -> Dict[str, Any]:
         """Get user's quizzes with filtering"""
         try:
+            db = self._require_db()
             skip = (page - 1) * limit
-            
-            # Build filter
-            filter_dict = {"userId": user_id}
-            
-            if completed is not None:
-                filter_dict["completedAt"] = {"$exists": completed}
-            
-            # Get quizzes
-            quizzes = await self.db.quizzes.find(
-                filter_dict
-            ).sort("createdAt", -1).skip(skip).limit(limit).to_list(length=limit)
-            
-            # Get total count
-            total = await self.db.quizzes.count_documents(filter_dict)
+            all_quizzes = []
+            for doc in db.collection("quizzes").where("userId", "==", user_id).stream():
+                quiz = self._with_id(doc.id, doc.to_dict() or {})
+                is_completed = bool(quiz.get("completedAt"))
+                if completed is not None and is_completed != completed:
+                    continue
+                all_quizzes.append(quiz)
+            all_quizzes.sort(key=lambda x: x.get("createdAt") or datetime.min, reverse=True)
+            total = len(all_quizzes)
+            quizzes = all_quizzes[skip:skip + limit]
             
             return {
                 "quizzes": [QuizResponse(**quiz) for quiz in quizzes],
@@ -158,12 +165,13 @@ class QuizService:
         """Submit quiz answers and calculate score"""
         try:
             # Get quiz
-            quiz = await self.db.quizzes.find_one({
-                "_id": quiz_id,
-                "userId": user_id
-            })
-            
-            if not quiz:
+            db = self._require_db()
+            quiz_ref = db.collection("quizzes").document(quiz_id)
+            snapshot = quiz_ref.get()
+            if not snapshot.exists:
+                raise ValueError("Quiz not found")
+            quiz = self._with_id(quiz_id, snapshot.to_dict() or {})
+            if quiz.get("userId") != user_id:
                 raise ValueError("Quiz not found")
             
             if quiz.get("completedAt"):
@@ -173,16 +181,13 @@ class QuizService:
             score_result = await self._calculate_score(quiz["questions"], answers, written_answers)
             
             # Update quiz
-            await self.db.quizzes.update_one(
-                {"_id": quiz_id},
+            quiz_ref.update(
                 {
-                    "$set": {
-                        "completedAt": datetime.utcnow(),
-                        "score": score_result["score"],
-                        "answers": answers,
-                        "writtenAnswers": written_answers or {},
-                        "timeSpent": score_result.get("timeSpent", 0)
-                    }
+                    "completedAt": datetime.utcnow(),
+                    "score": score_result["score"],
+                    "answers": answers,
+                    "writtenAnswers": written_answers or {},
+                    "timeSpent": score_result.get("timeSpent", 0)
                 }
             )
             
@@ -215,12 +220,12 @@ class QuizService:
         """Evaluate written answer using AI"""
         try:
             # Get quiz and question
-            quiz = await self.db.quizzes.find_one({
-                "_id": quiz_id,
-                "userId": user_id
-            })
-            
-            if not quiz:
+            db = self._require_db()
+            snapshot = db.collection("quizzes").document(quiz_id).get()
+            if not snapshot.exists:
+                raise ValueError("Quiz not found")
+            quiz = self._with_id(quiz_id, snapshot.to_dict() or {})
+            if quiz.get("userId") != user_id:
                 raise ValueError("Quiz not found")
             
             # Find the question
@@ -257,12 +262,12 @@ class QuizService:
         """Get hint for written question"""
         try:
             # Get quiz and question
-            quiz = await self.db.quizzes.find_one({
-                "_id": quiz_id,
-                "userId": user_id
-            })
-            
-            if not quiz:
+            db = self._require_db()
+            snapshot = db.collection("quizzes").document(quiz_id).get()
+            if not snapshot.exists:
+                raise ValueError("Quiz not found")
+            quiz = self._with_id(quiz_id, snapshot.to_dict() or {})
+            if quiz.get("userId") != user_id:
                 raise ValueError("Quiz not found")
             
             # Find the question
@@ -300,30 +305,20 @@ class QuizService:
     async def get_quiz_stats(self, user_id: str) -> Dict[str, Any]:
         """Get user's quiz statistics"""
         try:
-            pipeline = [
-                {"$match": {"userId": user_id, "completedAt": {"$exists": True}}},
-                {
-                    "$group": {
-                        "_id": None,
-                        "totalQuizzes": {"$sum": 1},
-                        "averageScore": {"$avg": {"$divide": ["$score", "$maxScore"]}},
-                        "bestScore": {"$max": {"$divide": ["$score", "$maxScore"]}},
-                        "totalQuestions": {"$sum": {"$size": {"$ifNull": ["$questions", []]}}},
-                        "lastCompleted": {"$max": "$completedAt"}
-                    }
-                }
-            ]
-            
-            stats = await self.db.quizzes.aggregate(pipeline).to_list(length=1)
-            
-            if stats:
-                stat = stats[0]
+            db = self._require_db()
+            quizzes = []
+            for doc in db.collection("quizzes").where("userId", "==", user_id).stream():
+                q = doc.to_dict() or {}
+                if q.get("completedAt"):
+                    quizzes.append(q)
+            if quizzes:
+                pct_scores = [(q.get("score", 0) / q.get("maxScore", 1)) for q in quizzes if q.get("maxScore")]
                 return {
-                    "totalQuizzes": stat["totalQuizzes"],
-                    "averageScore": round(stat["averageScore"] * 100, 1),
-                    "bestScore": round(stat["bestScore"] * 100, 1),
-                    "totalQuestions": stat["totalQuestions"],
-                    "lastCompleted": stat["lastCompleted"]
+                    "totalQuizzes": len(quizzes),
+                    "averageScore": round((sum(pct_scores) / len(pct_scores)) * 100, 1) if pct_scores else 0,
+                    "bestScore": round(max(pct_scores) * 100, 1) if pct_scores else 0,
+                    "totalQuestions": sum(len(q.get("questions", [])) for q in quizzes),
+                    "lastCompleted": max((q.get("completedAt") for q in quizzes), default=None)
                 }
             else:
                 return {
@@ -341,12 +336,11 @@ class QuizService:
     async def delete_quiz(self, user_id: str, quiz_id: str) -> bool:
         """Delete quiz"""
         try:
-            result = await self.db.quizzes.delete_one({
-                "_id": quiz_id,
-                "userId": user_id
-            })
-            
-            if result.deleted_count > 0:
+            db = self._require_db()
+            ref = db.collection("quizzes").document(quiz_id)
+            snapshot = ref.get()
+            if snapshot.exists and (snapshot.to_dict() or {}).get("userId") == user_id:
+                ref.delete()
                 # Log activity
                 await self._log_activity("quiz_deleted", user_id, {
                     "quizId": quiz_id
@@ -367,18 +361,20 @@ class QuizService:
             return {"topic": topic, "sourceId": None}
         
         elif source == QuizSource.CHAT:
-            session = await self.db.chat_sessions.find_one({
-                "_id": session_id,
-                "userId": user_id
-            })
+            db = self._require_db()
+            session_snapshot = db.collection("chat_sessions").document(session_id).get()
             
-            if not session:
+            if not session_snapshot.exists:
+                raise ValueError("Chat session not found")
+            session = session_snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
                 raise ValueError("Chat session not found")
             
             # Get messages for content
-            messages = await self.db.messages.find(
-                {"sessionId": session_id}
-            ).sort("timestamp", 1).to_list(length=50)
+            messages = []
+            for doc in db.collection("messages").where("sessionId", "==", session_id).stream():
+                messages.append(doc.to_dict() or {})
+            messages.sort(key=lambda x: x.get("timestamp") or datetime.min)
             
             content_text = " ".join([msg["content"] for msg in messages])
             topic = session.get("title", "Chat Discussion")
@@ -390,12 +386,13 @@ class QuizService:
             }
         
         elif source == QuizSource.NOTES:
-            note = await self.db.notes.find_one({
-                "_id": note_id,
-                "userId": user_id
-            })
+            db = self._require_db()
+            note_snapshot = db.collection("notes").document(note_id).get()
             
-            if not note:
+            if not note_snapshot.exists:
+                raise ValueError("Note not found")
+            note = note_snapshot.to_dict() or {}
+            if note.get("userId") != user_id:
                 raise ValueError("Note not found")
             
             return {
@@ -515,13 +512,15 @@ class QuizService:
     async def _log_activity(self, action: str, user_id: str, metadata: Optional[Dict[str, Any]] = None):
         """Log quiz activity"""
         try:
+            db = self._require_db()
             activity_doc = {
+                "id": str(uuid4()),
                 "userId": user_id,
                 "action": action,
                 "details": metadata or {},
                 "timestamp": datetime.utcnow()
             }
-            await self.db.activity_logs.insert_one(activity_doc)
+            db.collection("activity_logs").document(activity_doc["id"]).set(activity_doc)
         except Exception as e:
             logger.error(f"Error logging activity: {e}")
 

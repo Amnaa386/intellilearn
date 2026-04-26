@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { signInWithPopup } from 'firebase/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -16,6 +17,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { getGoogleAuth } from '@/lib/firebase';
 
 const formVariants = {
   enter: (direction) => ({
@@ -118,10 +120,13 @@ export default function UnifiedAuthPage() {
     agreeTerms: false,
   });
   const [showSignupPassword, setShowSignupPassword] = useState(false);
+  const [showSignupConfirmPassword, setShowSignupConfirmPassword] = useState(false);
   const [signupError, setSignupError] = useState('');
+  const [authError, setAuthError] = useState('');
 
   const [loadingLogin, setLoadingLogin] = useState(false);
   const [loadingSignup, setLoadingSignup] = useState(false);
+  const [loadingGoogle, setLoadingGoogle] = useState(false);
 
   const switchMode = (toSignup) => {
     if (toSignup === isSignup) return;
@@ -146,6 +151,7 @@ export default function UnifiedAuthPage() {
 
   const handleLogin = (ev) => {
     ev.preventDefault();
+    setAuthError('');
     if (!runLoginValidation()) return;
     setLoadingLogin(true);
     setTimeout(() => {
@@ -165,11 +171,12 @@ export default function UnifiedAuthPage() {
         }),
       );
       navigate('/dashboard/student', { replace: true });
-    }, 900);
+    }, 250);
   };
 
   const handleSignup = (ev) => {
     ev.preventDefault();
+    setAuthError('');
     setSignupError('');
     if (!signup.name.trim()) {
       setSignupError('Please enter your full name');
@@ -206,7 +213,74 @@ export default function UnifiedAuthPage() {
         }),
       );
       navigate('/dashboard/student', { replace: true });
-    }, 1200);
+    }, 300);
+  };
+
+  const sanitizeAvatar = (avatar) => {
+    if (typeof avatar !== 'string') return '';
+    const trimmed = avatar.trim();
+    if (!trimmed || trimmed === 'undefined' || trimmed === 'null') return '';
+    if (!trimmed.startsWith('http') && !trimmed.startsWith('data:image/')) return '';
+    return trimmed;
+  };
+
+  const persistSessionFromBackend = (payload, fallbackAvatar = '') => {
+    const user = payload?.user;
+    if (!user) throw new Error('Invalid auth response');
+    const userRole = user.role || 'student';
+    const avatarFromBackend = sanitizeAvatar(user?.profile?.avatar);
+    const avatarFromFirebase = sanitizeAvatar(fallbackAvatar);
+    const resolvedAvatar = avatarFromBackend || avatarFromFirebase;
+
+    localStorage.setItem('intellilearn_isLoggedIn', 'true');
+    localStorage.setItem('intellilearn_role', userRole);
+    localStorage.setItem('intellilearn_admin_backend_verified', userRole === 'admin' ? 'true' : 'false');
+    localStorage.setItem(
+      'intellilearn_user',
+      JSON.stringify({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: userRole,
+        profile: {
+          ...(user.profile || {}),
+          avatar: resolvedAvatar,
+        },
+      }),
+    );
+    localStorage.setItem('intellilearn_access_token', payload.access_token || '');
+    localStorage.setItem('intellilearn_refresh_token', payload.refresh_token || '');
+    window.dispatchEvent(new Event('intellilearn-user-updated'));
+  };
+
+  const handleGoogleAuth = async () => {
+    try {
+      setSignupError('');
+      setAuthError('');
+      const { auth, googleProvider } = getGoogleAuth();
+      setLoadingGoogle(true);
+      const cred = await signInWithPopup(auth, googleProvider);
+      const idToken = await cred.user.getIdToken();
+      const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+      const response = await fetch(`${apiBase}/api/auth/google-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id_token: idToken }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || 'Google login failed');
+      }
+
+      const payload = await response.json();
+      persistSessionFromBackend(payload, cred?.user?.photoURL || '');
+      navigate('/dashboard/student', { replace: true });
+    } catch (error) {
+      setAuthError(error?.message || 'Google sign-in failed. Please try again.');
+    } finally {
+      setLoadingGoogle(false);
+    }
   };
 
   const inputClass =
@@ -393,6 +467,25 @@ export default function UnifiedAuthPage() {
                     </Button>
                   </motion.div>
 
+                  {authError && (
+                    <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-center text-xs font-medium text-rose-300">
+                      {authError}
+                    </p>
+                  )}
+
+                  <Button
+                    type="button"
+                    onClick={handleGoogleAuth}
+                    disabled={loadingGoogle}
+                    variant="outline"
+                    className="h-11 w-full rounded-xl border-white/15 bg-slate-900/50 text-slate-200 hover:bg-slate-800/60"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <img src="/google.png" alt="Google" className="h-4 w-4 object-contain" />
+                      {loadingGoogle ? 'Connecting Google...' : 'Continue with Google'}
+                    </span>
+                  </Button>
+
                   <p className="text-center text-[11px] text-slate-600">
                     By signing in, you agree to our Terms and Privacy Policy.
                   </p>
@@ -475,16 +568,27 @@ export default function UnifiedAuthPage() {
                       <label htmlFor="su-confirm" className="text-xs font-medium text-slate-400">
                         Confirm password
                       </label>
-                      <Input
-                        id="su-confirm"
-                        name="confirmPassword"
-                        type="password"
-                        autoComplete="new-password"
-                        value={signup.confirmPassword}
-                        onChange={(e) => setSignup((p) => ({ ...p, confirmPassword: e.target.value }))}
-                        className={inputClass}
-                        placeholder="Repeat password"
-                      />
+                      <div className="relative">
+                        <Input
+                          id="su-confirm"
+                          name="confirmPassword"
+                          type={showSignupConfirmPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={signup.confirmPassword}
+                          onChange={(e) => setSignup((p) => ({ ...p, confirmPassword: e.target.value }))}
+                          className={cn(inputClass, 'pr-11')}
+                          placeholder="Repeat password"
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200"
+                          onClick={() => setShowSignupConfirmPassword((v) => !v)}
+                          aria-label={showSignupConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                        >
+                          {showSignupConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -496,6 +600,12 @@ export default function UnifiedAuthPage() {
                     >
                       {signupError}
                     </motion.p>
+                  )}
+
+                  {authError && (
+                    <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-center text-xs font-medium text-rose-300">
+                      {authError}
+                    </p>
                   )}
 
                   <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/5 bg-slate-900/40 p-3">
@@ -537,6 +647,19 @@ export default function UnifiedAuthPage() {
                       )}
                     </Button>
                   </motion.div>
+
+                  <Button
+                    type="button"
+                    onClick={handleGoogleAuth}
+                    disabled={loadingGoogle}
+                    variant="outline"
+                    className="h-11 w-full rounded-xl border-white/15 bg-slate-900/50 text-slate-200 hover:bg-slate-800/60"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <img src="/google.png" alt="Google" className="h-4 w-4 object-contain" />
+                      {loadingGoogle ? 'Connecting Google...' : 'Continue with Google'}
+                    </span>
+                  </Button>
                 </motion.form>
               )}
             </AnimatePresence>

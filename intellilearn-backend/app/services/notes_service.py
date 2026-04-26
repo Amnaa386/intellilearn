@@ -1,17 +1,20 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, List, Optional
-from bson import ObjectId
+from uuid import uuid4
 import logging
 from app.core.database import get_database
-from app.core.redis import set_cache, get_cache, delete_cache
 from app.services.ai_service import ai_service
 from app.models.notes import NotesCreate, NotesResponse, NotesCategory, NotesType
 
 logger = logging.getLogger(__name__)
 
 class NotesService:
-    def __init__(self):
-        self.db = get_database()
+    @staticmethod
+    def _require_db():
+        db = get_database()
+        if db is None:
+            raise RuntimeError("Database connection is not available")
+        return db
     
     async def generate_notes(self, user_id: str, topic: str, complexity: NotesType = NotesType.SIMPLE, 
                            include_questions: bool = True, category: Optional[NotesCategory] = None) -> NotesResponse:
@@ -25,21 +28,22 @@ class NotesService:
             ai_notes = await ai_service.generate_notes(topic, complexity.value, include_questions)
             
             # Create notes document
-            notes_id = str(ObjectId())
+            notes_id = str(uuid4())
             notes_doc = {
-                "_id": notes_id,
+                "id": notes_id,
                 "userId": user_id,
                 "title": ai_notes["title"],
                 "content": ai_notes["content"],
-                "category": category,
-                "type": complexity,
+                "category": category.value,
+                "type": complexity.value,
                 "tags": self._generate_tags(topic, category),
                 "topic": topic,
                 "bookmarked": False,
                 "generatedAt": datetime.utcnow()
             }
             
-            await self.db.notes.insert_one(notes_doc)
+            db = self._require_db()
+            db.collection("notes").document(notes_id).set(notes_doc)
             
             # Log activity
             await self._log_activity("notes_generated", user_id, {
@@ -59,25 +63,26 @@ class NotesService:
                            search: Optional[str] = None) -> Dict[str, Any]:
         """Get user's notes with filtering"""
         try:
+            db = self._require_db()
             skip = (page - 1) * limit
-            
-            # Build filter
-            filter_dict = {"userId": user_id}
-            
-            if category:
-                filter_dict["category"] = category
-            if bookmarked is not None:
-                filter_dict["bookmarked"] = bookmarked
-            if search:
-                filter_dict["$text"] = {"$search": search}
-            
-            # Get notes
-            notes = await self.db.notes.find(
-                filter_dict
-            ).sort("generatedAt", -1).skip(skip).limit(limit).to_list(length=limit)
-            
-            # Get total count
-            total = await self.db.notes.count_documents(filter_dict)
+            docs = db.collection("notes").where("userId", "==", user_id).stream()
+            all_notes = []
+            for doc in docs:
+                note = doc.to_dict() or {}
+                note["id"] = doc.id
+                if category and note.get("category") != category.value:
+                    continue
+                if bookmarked is not None and note.get("bookmarked", False) != bookmarked:
+                    continue
+                if search:
+                    query = search.lower()
+                    haystack = f"{note.get('title','')} {note.get('content','')} {note.get('topic','')}".lower()
+                    if query not in haystack:
+                        continue
+                all_notes.append(note)
+            all_notes.sort(key=lambda x: x.get("generatedAt") or datetime.min, reverse=True)
+            total = len(all_notes)
+            notes = all_notes[skip:skip + limit]
             
             return {
                 "notes": [NotesResponse(**note) for note in notes],
@@ -94,12 +99,13 @@ class NotesService:
     async def get_note_by_id(self, user_id: str, note_id: str) -> Optional[NotesResponse]:
         """Get specific note by ID"""
         try:
-            note = await self.db.notes.find_one({
-                "_id": note_id,
-                "userId": user_id
-            })
-            
-            if note:
+            db = self._require_db()
+            snapshot = db.collection("notes").document(note_id).get()
+            if snapshot.exists:
+                note = snapshot.to_dict() or {}
+                if note.get("userId") != user_id:
+                    return None
+                note["id"] = note_id
                 return NotesResponse(**note)
             return None
             
@@ -112,22 +118,22 @@ class NotesService:
         try:
             # Remove sensitive fields
             update_data = {k: v for k, v in update_data.items() 
-                          if k not in ["_id", "userId", "generatedAt"]}
+                          if k not in ["_id", "id", "userId", "generatedAt"]}
             
             # Add updated timestamp
             update_data["updatedAt"] = datetime.utcnow()
             
-            # Update note
-            result = await self.db.notes.update_one(
-                {"_id": note_id, "userId": user_id},
-                {"$set": update_data}
-            )
-            
-            if result.modified_count == 0:
+            db = self._require_db()
+            note_ref = db.collection("notes").document(note_id)
+            snapshot = note_ref.get()
+            if not snapshot.exists:
                 return None
-            
-            # Get updated note
-            note = await self.db.notes.find_one({"_id": note_id, "userId": user_id})
+            note = snapshot.to_dict() or {}
+            if note.get("userId") != user_id:
+                return None
+            note_ref.update(update_data)
+            note = note_ref.get().to_dict() or {}
+            note["id"] = note_id
             if note:
                 return NotesResponse(**note)
             return None
@@ -139,12 +145,11 @@ class NotesService:
     async def delete_note(self, user_id: str, note_id: str) -> bool:
         """Delete note"""
         try:
-            result = await self.db.notes.delete_one({
-                "_id": note_id,
-                "userId": user_id
-            })
-            
-            if result.deleted_count > 0:
+            db = self._require_db()
+            note_ref = db.collection("notes").document(note_id)
+            snapshot = note_ref.get()
+            if snapshot.exists and (snapshot.to_dict() or {}).get("userId") == user_id:
+                note_ref.delete()
                 # Log activity
                 await self._log_activity("notes_deleted", user_id, {
                     "notesId": note_id
@@ -160,20 +165,18 @@ class NotesService:
     async def toggle_bookmark(self, user_id: str, note_id: str) -> Optional[bool]:
         """Toggle note bookmark status"""
         try:
-            note = await self.db.notes.find_one({
-                "_id": note_id,
-                "userId": user_id
-            })
-            
-            if not note:
+            db = self._require_db()
+            note_ref = db.collection("notes").document(note_id)
+            snapshot = note_ref.get()
+            if not snapshot.exists:
+                return None
+            note = snapshot.to_dict() or {}
+            if note.get("userId") != user_id:
                 return None
             
             new_bookmark_status = not note.get("bookmarked", False)
             
-            await self.db.notes.update_one(
-                {"_id": note_id, "userId": user_id},
-                {"$set": {"bookmarked": new_bookmark_status}}
-            )
+            note_ref.update({"bookmarked": new_bookmark_status})
             
             # Log activity
             await self._log_activity("notes_bookmarked", user_id, {
@@ -194,28 +197,18 @@ class NotesService:
     async def get_notes_stats(self, user_id: str) -> Dict[str, Any]:
         """Get user's notes statistics"""
         try:
-            pipeline = [
-                {"$match": {"userId": user_id}},
-                {
-                    "$group": {
-                        "_id": None,
-                        "totalNotes": {"$sum": 1},
-                        "bookmarkedNotes": {"$sum": {"$cond": [{"$eq": ["$bookmarked", True]}, 1, 0]}},
-                        "categories": {"$addToSet": "$category"},
-                        "lastGenerated": {"$max": "$generatedAt"}
-                    }
-                }
-            ]
-            
-            stats = await self.db.notes.aggregate(pipeline).to_list(length=1)
-            
-            if stats:
-                stat = stats[0]
+            db = self._require_db()
+            notes = []
+            for doc in db.collection("notes").where("userId", "==", user_id).stream():
+                notes.append(doc.to_dict() or {})
+            if notes:
+                categories = sorted({n.get("category", "general") for n in notes})
+                last_generated = max((n.get("generatedAt") for n in notes if n.get("generatedAt")), default=None)
                 return {
-                    "totalNotes": stat["totalNotes"],
-                    "bookmarkedNotes": stat["bookmarkedNotes"],
-                    "categories": stat["categories"],
-                    "lastGenerated": stat["lastGenerated"]
+                    "totalNotes": len(notes),
+                    "bookmarkedNotes": sum(1 for n in notes if n.get("bookmarked")),
+                    "categories": categories,
+                    "lastGenerated": last_generated
                 }
             else:
                 return {
@@ -232,29 +225,14 @@ class NotesService:
     async def search_notes(self, user_id: str, query: str, page: int = 1, limit: int = 20) -> Dict[str, Any]:
         """Search notes by text"""
         try:
-            skip = (page - 1) * limit
-            
-            # Text search
-            notes = await self.db.notes.find(
-                {
-                    "userId": user_id,
-                    "$text": {"$search": query}
-                },
-                {"score": {"$meta": "textScore"}}
-            ).sort("score", {"$meta": "textScore"}).skip(skip).limit(limit).to_list(length=limit)
-            
-            # Get total count
-            total = await self.db.notes.count_documents({
-                "userId": user_id,
-                "$text": {"$search": query}
-            })
+            result = await self.get_user_notes(user_id, page, limit, search=query)
             
             return {
-                "notes": [NotesResponse(**note) for note in notes],
-                "total": total,
-                "page": page,
-                "limit": limit,
-                "totalPages": (total + limit - 1) // limit,
+                "notes": result["notes"],
+                "total": result["total"],
+                "page": result["page"],
+                "limit": result["limit"],
+                "totalPages": result["totalPages"],
                 "query": query
             }
             
@@ -305,13 +283,15 @@ class NotesService:
     async def _log_activity(self, action: str, user_id: str, metadata: Optional[Dict[str, Any]] = None):
         """Log notes activity"""
         try:
+            db = self._require_db()
             activity_doc = {
+                "id": str(uuid4()),
                 "userId": user_id,
                 "action": action,
                 "details": metadata or {},
                 "timestamp": datetime.utcnow()
             }
-            await self.db.activity_logs.insert_one(activity_doc)
+            db.collection("activity_logs").document(activity_doc["id"]).set(activity_doc)
         except Exception as e:
             logger.error(f"Error logging activity: {e}")
 

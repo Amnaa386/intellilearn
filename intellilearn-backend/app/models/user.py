@@ -36,6 +36,9 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class GoogleLoginRequest(BaseModel):
+    id_token: str = Field(..., min_length=10)
+
 class UserUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=100)
     status: Optional[UserStatus] = None

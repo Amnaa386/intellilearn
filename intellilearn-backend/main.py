@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.core.config import settings
-from app.core.database import connect_to_mongodb, close_mongodb_connection
+from app.core.database import connect_to_database, close_database_connection
 from app.core.redis import connect_to_redis, close_redis_connection
 from app.routers import auth, chat, notes, quiz, analytics, admin, upload, user
 from app.middleware.rate_limiter import RateLimiterMiddleware
@@ -21,12 +21,12 @@ security = HTTPBearer()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    await connect_to_mongodb()
+    await connect_to_database()
     await connect_to_redis()
     print("🚀 IntelliLearn API started successfully!")
     yield
     # Shutdown
-    await close_mongodb_connection()
+    await close_database_connection()
     await close_redis_connection()
     print("👋 IntelliLearn API shut down gracefully!")
 

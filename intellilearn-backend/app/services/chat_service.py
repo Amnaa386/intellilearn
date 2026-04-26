@@ -1,25 +1,28 @@
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-from bson import ObjectId
+from uuid import uuid4
 import logging
 from app.core.database import get_database
-from app.core.redis import set_cache, get_cache, delete_cache
 from app.services.ai_service import ai_service
 from app.models.chat import ChatSessionCreate, ChatSessionResponse, MessageCreate, MessageResponse, MessageType
 
 logger = logging.getLogger(__name__)
 
 class ChatService:
-    def __init__(self):
-        self.db = get_database()
+    @staticmethod
+    def _require_db():
+        db = get_database()
+        if db is None:
+            raise RuntimeError("Database connection is not available")
+        return db
     
     async def create_session(self, user_id: str, session_data: Optional[ChatSessionCreate] = None) -> ChatSessionResponse:
         """Create a new chat session"""
         try:
-            session_id = f"chat_{datetime.utcnow().timestamp()}_{ObjectId()}"
+            session_id = f"chat_{datetime.utcnow().timestamp()}_{uuid4()}"
             
             session_doc = {
-                "_id": session_id,
+                "id": session_id,
                 "userId": user_id,
                 "sessionId": session_id,
                 "title": session_data.title if session_data else "New Chat Session",
@@ -29,11 +32,12 @@ class ChatService:
                 "updatedAt": datetime.utcnow()
             }
             
-            await self.db.chat_sessions.insert_one(session_doc)
+            db = self._require_db()
+            db.collection("chat_sessions").document(session_id).set(session_doc)
             
             # Add welcome message
             welcome_message = {
-                "_id": str(ObjectId()),
+                "_id": str(uuid4()),
                 "sessionId": session_id,
                 "userId": user_id,
                 "content": "Hello! I'm Dr. Intelli, your AI Tutor. How can I help you with your studies today?",
@@ -41,12 +45,12 @@ class ChatService:
                 "timestamp": datetime.utcnow()
             }
             
-            await self.db.messages.insert_one(welcome_message)
+            welcome_message["id"] = welcome_message.pop("_id")
+            db.collection("messages").document(welcome_message["id"]).set(welcome_message)
             
             # Update message count
-            await self.db.chat_sessions.update_one(
-                {"_id": session_id},
-                {"$set": {"messageCount": 1, "updatedAt": datetime.utcnow()}}
+            db.collection("chat_sessions").document(session_id).update(
+                {"messageCount": 1, "updatedAt": datetime.utcnow()}
             )
             
             return ChatSessionResponse(**session_doc)
@@ -58,12 +62,16 @@ class ChatService:
     async def get_user_sessions(self, user_id: str, page: int = 1, limit: int = 20) -> List[ChatSessionResponse]:
         """Get user's chat sessions"""
         try:
+            db = self._require_db()
             skip = (page - 1) * limit
-            
-            sessions = await self.db.chat_sessions.find(
-                {"userId": user_id}
-            ).sort("updatedAt", -1).skip(skip).limit(limit).to_list(length=limit)
-            
+            docs = db.collection("chat_sessions").where("userId", "==", user_id).stream()
+            sessions = []
+            for doc in docs:
+                row = doc.to_dict() or {}
+                row["id"] = doc.id
+                sessions.append(row)
+            sessions.sort(key=lambda x: x.get("updatedAt") or datetime.min, reverse=True)
+            sessions = sessions[skip:skip + limit]
             return [ChatSessionResponse(**session) for session in sessions]
             
         except Exception as e:
@@ -74,64 +82,120 @@ class ChatService:
         """Get chat session with all messages"""
         try:
             # Get session
-            session = await self.db.chat_sessions.find_one({
-                "_id": session_id,
-                "userId": user_id
-            })
-            
-            if not session:
+            db = self._require_db()
+            session_snapshot = db.collection("chat_sessions").document(session_id).get()
+            if not session_snapshot.exists:
+                return None
+            session = session_snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
                 return None
             
             # Get messages
-            messages = await self.db.messages.find(
-                {"sessionId": session_id}
-            ).sort("timestamp", 1).to_list(length=None)
-            
+            messages = []
+            for doc in db.collection("messages").where("sessionId", "==", session_id).stream():
+                row = doc.to_dict() or {}
+                row["id"] = doc.id
+                messages.append(row)
+            messages.sort(key=lambda x: x.get("timestamp") or datetime.min)
             message_responses = [MessageResponse(**msg) for msg in messages]
             
+            session_response = ChatSessionResponse(**session)
             return {
-                "session": ChatSessionResponse(**session),
-                "messages": message_responses
+                "id": session_response.id,
+                "userId": session_response.userId,
+                "sessionId": session_response.sessionId,
+                "title": session_response.title,
+                "messageCount": session_response.messageCount,
+                "preview": session_response.preview,
+                "createdAt": session_response.createdAt,
+                "updatedAt": session_response.updatedAt,
+                "messages": message_responses,
             }
             
         except Exception as e:
             logger.error(f"Error getting session with messages: {e}")
+            return None
+
+    async def auto_generate_session_title(self, user_id: str, session_id: str, seed_text: str = "") -> Optional[str]:
+        """Generate AI-based concise title for a chat session."""
+        try:
+            db = self._require_db()
+            session_ref = db.collection("chat_sessions").document(session_id)
+            snapshot = session_ref.get()
+            if not snapshot.exists:
+                return None
+            session = snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
+                return None
+
+            if not seed_text:
+                latest_user_message = None
+                for doc in db.collection("messages").where("sessionId", "==", session_id).stream():
+                    row = doc.to_dict() or {}
+                    if row.get("type") == MessageType.USER.value:
+                        latest_user_message = row.get("content", "")
+                seed_text = latest_user_message or ""
+
+            if not seed_text:
+                return None
+
+            prompt = (
+                "Create a very short chat title (3-6 words) for this study conversation. "
+                "Return only title text, no quotes, no punctuation at end.\n\n"
+                f"User prompt: {seed_text}"
+            )
+            ai_result = await ai_service.generate_chat_response(prompt)
+            raw_title = (ai_result.get("message") or "").strip()
+            clean_title = raw_title.splitlines()[0].strip().strip('"').strip("'")
+            if len(clean_title) > 60:
+                clean_title = clean_title[:60].rstrip()
+            if not clean_title:
+                return None
+
+            session_ref.update({"title": clean_title, "updatedAt": datetime.utcnow()})
+            return clean_title
+        except Exception as e:
+            logger.error(f"Error auto-generating session title: {e}")
             return None
     
     async def send_message(self, user_id: str, session_id: str, message_data: MessageCreate) -> Dict[str, Any]:
         """Send a message and get AI response"""
         try:
             # Verify session belongs to user
-            session = await self.db.chat_sessions.find_one({
-                "_id": session_id,
-                "userId": user_id
-            })
-            
-            if not session:
+            db = self._require_db()
+            session_snapshot = db.collection("chat_sessions").document(session_id).get()
+            if not session_snapshot.exists:
+                raise ValueError("Session not found")
+            session = session_snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
                 raise ValueError("Session not found")
             
             # Create user message
-            user_message_id = str(ObjectId())
+            user_message_id = str(uuid4())
             user_message = {
-                "_id": user_message_id,
+                "id": user_message_id,
                 "sessionId": session_id,
                 "userId": user_id,
                 "content": message_data.content,
-                "type": MessageType.USER,
+                "type": MessageType.USER.value,
                 "timestamp": datetime.utcnow()
             }
             
-            await self.db.messages.insert_one(user_message)
+            db.collection("messages").document(user_message_id).set(user_message)
             
             # Get chat history for context
-            recent_messages = await self.db.messages.find(
-                {"sessionId": session_id}
-            ).sort("timestamp", -1).limit(10).to_list(length=10)
+            recent_messages = []
+            for doc in db.collection("messages").where("sessionId", "==", session_id).stream():
+                row = doc.to_dict() or {}
+                row["id"] = doc.id
+                recent_messages.append(row)
+            recent_messages.sort(key=lambda x: x.get("timestamp") or datetime.min, reverse=True)
+            recent_messages = recent_messages[:10]
             
             # Format for OpenAI
             chat_history = []
             for msg in reversed(recent_messages[1:]):  # Exclude the newest message
-                role = "user" if msg["type"] == MessageType.USER else "assistant"
+                role = "user" if msg["type"] == MessageType.USER.value else "assistant"
                 chat_history.append({
                     "role": role,
                     "content": msg["content"]
@@ -144,30 +208,27 @@ class ChatService:
             )
             
             # Create bot message
-            bot_message_id = str(ObjectId())
+            bot_message_id = str(uuid4())
             bot_message = {
-                "_id": bot_message_id,
+                "id": bot_message_id,
                 "sessionId": session_id,
                 "userId": user_id,
                 "content": ai_response["message"],
-                "type": MessageType.BOT,
+                "type": MessageType.BOT.value,
                 "timestamp": datetime.utcnow()
             }
             
-            await self.db.messages.insert_one(bot_message)
+            db.collection("messages").document(bot_message_id).set(bot_message)
             
             # Update session
             new_message_count = session["messageCount"] + 2
             preview = message_data.content[:100] + "..." if len(message_data.content) > 100 else message_data.content
             
-            await self.db.chat_sessions.update_one(
-                {"_id": session_id},
+            db.collection("chat_sessions").document(session_id).update(
                 {
-                    "$set": {
-                        "messageCount": new_message_count,
-                        "preview": preview,
-                        "updatedAt": datetime.utcnow()
-                    }
+                    "messageCount": new_message_count,
+                    "preview": preview,
+                    "updatedAt": datetime.utcnow()
                 }
             )
             
@@ -190,16 +251,19 @@ class ChatService:
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         """Delete a chat session and all messages"""
         try:
-            # Delete messages
-            await self.db.messages.delete_many({"sessionId": session_id})
-            
-            # Delete session
-            result = await self.db.chat_sessions.delete_one({
-                "_id": session_id,
-                "userId": user_id
-            })
-            
-            return result.deleted_count > 0
+            db = self._require_db()
+            session_ref = db.collection("chat_sessions").document(session_id)
+            session_snapshot = session_ref.get()
+            if not session_snapshot.exists:
+                return False
+            session = session_snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
+                return False
+
+            for doc in db.collection("messages").where("sessionId", "==", session_id).stream():
+                doc.reference.delete()
+            session_ref.delete()
+            return True
             
         except Exception as e:
             logger.error(f"Error deleting session: {e}")
@@ -208,17 +272,16 @@ class ChatService:
     async def update_session_title(self, user_id: str, session_id: str, title: str) -> bool:
         """Update chat session title"""
         try:
-            result = await self.db.chat_sessions.update_one(
-                {"_id": session_id, "userId": user_id},
-                {
-                    "$set": {
-                        "title": title,
-                        "updatedAt": datetime.utcnow()
-                    }
-                }
-            )
-            
-            return result.modified_count > 0
+            db = self._require_db()
+            session_ref = db.collection("chat_sessions").document(session_id)
+            snapshot = session_ref.get()
+            if not snapshot.exists:
+                return False
+            session = snapshot.to_dict() or {}
+            if session.get("userId") != user_id:
+                return False
+            session_ref.update({"title": title, "updatedAt": datetime.utcnow()})
+            return True
             
         except Exception as e:
             logger.error(f"Error updating session title: {e}")
@@ -227,27 +290,19 @@ class ChatService:
     async def get_session_stats(self, user_id: str) -> Dict[str, Any]:
         """Get user's chat statistics"""
         try:
-            pipeline = [
-                {"$match": {"userId": user_id}},
-                {
-                    "$group": {
-                        "_id": None,
-                        "totalSessions": {"$sum": 1},
-                        "totalMessages": {"$sum": "$messageCount"},
-                        "lastActivity": {"$max": "$updatedAt"}
-                    }
-                }
-            ]
-            
-            stats = await self.db.chat_sessions.aggregate(pipeline).to_list(length=1)
-            
-            if stats:
-                stat = stats[0]
+            db = self._require_db()
+            sessions = []
+            for doc in db.collection("chat_sessions").where("userId", "==", user_id).stream():
+                sessions.append(doc.to_dict() or {})
+            if sessions:
+                total_sessions = len(sessions)
+                total_messages = sum(int(s.get("messageCount", 0)) for s in sessions)
+                last_activity = max((s.get("updatedAt") for s in sessions if s.get("updatedAt")), default=None)
                 return {
-                    "totalSessions": stat["totalSessions"],
-                    "totalMessages": stat["totalMessages"],
-                    "lastActivity": stat["lastActivity"],
-                    "averageMessagesPerSession": stat["totalMessages"] / stat["totalSessions"] if stat["totalSessions"] > 0 else 0
+                    "totalSessions": total_sessions,
+                    "totalMessages": total_messages,
+                    "lastActivity": last_activity,
+                    "averageMessagesPerSession": total_messages / total_sessions if total_sessions > 0 else 0
                 }
             else:
                 return {
@@ -299,13 +354,15 @@ class ChatService:
     async def _log_activity(self, action: str, user_id: str, metadata: Optional[Dict[str, Any]] = None):
         """Log chat activity"""
         try:
+            db = self._require_db()
             activity_doc = {
+                "id": str(uuid4()),
                 "userId": user_id,
                 "action": action,
                 "details": metadata or {},
                 "timestamp": datetime.utcnow()
             }
-            await self.db.activity_logs.insert_one(activity_doc)
+            db.collection("activity_logs").document(activity_doc["id"]).set(activity_doc)
         except Exception as e:
             logger.error(f"Error logging activity: {e}")
 

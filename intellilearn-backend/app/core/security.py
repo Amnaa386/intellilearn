@@ -84,17 +84,24 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             detail="Invalid token payload"
         )
     
-    # Get user from database
+    # Get user from Firestore
     from app.core.database import get_database
     db = get_database()
-    
-    user = await db.users.find_one({"_id": user_id})
-    if user is None:
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection unavailable"
+        )
+
+    snapshot = db.collection("users").document(user_id).get()
+    if not snapshot.exists:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found"
         )
-    
+    user = snapshot.to_dict() or {}
+    user["id"] = user_id
+
     return user
 
 async def get_current_admin(current_user: Dict = Depends(get_current_user)):

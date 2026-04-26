@@ -6,6 +6,7 @@ from app.services.analytics_service import analytics_service
 from app.core.security import get_current_admin
 from app.core.redis import increment_rate_limit
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,28 +26,27 @@ async def get_all_users(
         from app.core.database import get_database
         db = get_database()
         
+        if db is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database unavailable")
+
         skip = (page - 1) * limit
-        
-        # Build filter
-        filter_dict = {}
-        if search:
-            filter_dict["$or"] = [
-                {"name": {"$regex": search, "$options": "i"}},
-                {"email": {"$regex": search, "$options": "i"}}
-            ]
-        if role:
-            filter_dict["role"] = role
-        if status:
-            filter_dict["status"] = status
-        
-        # Get users
-        users = await db.users.find(
-            filter_dict,
-            {"password_hash": 0}  # Exclude password hash
-        ).sort("createdAt", -1).skip(skip).limit(limit).to_list(length=limit)
-        
-        # Get total count
-        total = await db.users.count_documents(filter_dict)
+        users_raw = []
+        for doc in db.collection("users").stream():
+            u = doc.to_dict() or {}
+            u["id"] = doc.id
+            if search:
+                haystack = f"{u.get('name','')} {u.get('email','')}".lower()
+                if search.lower() not in haystack:
+                    continue
+            if role and u.get("role") != role.value:
+                continue
+            if status and u.get("status") != status.value:
+                continue
+            users_raw.append(u)
+
+        users_raw.sort(key=lambda x: x.get("createdAt") or datetime.min, reverse=True)
+        total = len(users_raw)
+        users = users_raw[skip:skip + limit]
         
         return {
             "users": [UserResponse(**user) for user in users],

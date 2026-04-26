@@ -6,7 +6,7 @@ import { Cpu, Zap, Brain, MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useNavigate } from 'react-router-dom';
 
-export default function AIRobot() {
+export default function AIRobot({ compact = false, isDarkMode = true }) {
   const navigate = useNavigate();
 
   const handleStartLearning = () => {
@@ -15,7 +15,7 @@ export default function AIRobot() {
   };
 
   return (
-    <div className="p-6 rounded-xl bg-gradient-to-br from-slate-800/50 to-slate-900/50 border border-slate-700/50 flex flex-col items-center text-center h-full">
+    <div className={`p-6 rounded-xl border flex flex-col items-center text-center ${isDarkMode ? 'bg-gradient-to-br from-slate-800/50 to-slate-900/50 border-slate-700/50' : 'bg-white border-slate-200'} ${compact ? '' : 'h-full'}`}>
       {/* Robot Animation */}
       <motion.div
         animate={{ y: [0, -10, 0] }}
@@ -78,13 +78,14 @@ export default function AIRobot() {
       </motion.div>
 
       {/* Status */}
-      <h2 className="text-lg font-bold text-slate-100 mb-2">Your AI Tutor</h2>
+      <h2 className={`text-lg font-bold mb-2 ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>Your AI Tutor</h2>
       <div className="flex items-center justify-center gap-2 mb-4">
         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-        <p className="text-sm text-slate-400">Ready to help</p>
+        <p className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Ready to help</p>
       </div>
 
       {/* Features */}
+      {!compact ? (
       <div className="space-y-3 mb-6 w-full">
         <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700/50 text-left">
           <div className="flex items-center gap-2 mb-1">
@@ -110,8 +111,10 @@ export default function AIRobot() {
           <p className="text-xs text-slate-400">24/7 availability</p>
         </div>
       </div>
+      ) : null}
 
       {/* CTA */}
+      {!compact ? (
       <motion.div
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
@@ -123,6 +126,7 @@ export default function AIRobot() {
           Start Learning
         </Button>
       </motion.div>
+      ) : null}
     </div>
   );
 }
