@@ -32,7 +32,12 @@ async def ask_ai(request: AIRequest, current_user: dict = Depends(get_current_us
         
         # Send message
         message_data = MessageCreate(content=request.message, type="user")
-        result = await chat_service.send_message(current_user["id"], session_id, message_data)
+        result = await chat_service.send_message(
+            current_user["id"],
+            session_id,
+            message_data,
+            request.context or {},
+        )
         
         return AIResponse(
             message=result["botMessage"].content,

@@ -158,7 +158,13 @@ class ChatService:
             logger.error(f"Error auto-generating session title: {e}")
             return None
     
-    async def send_message(self, user_id: str, session_id: str, message_data: MessageCreate) -> Dict[str, Any]:
+    async def send_message(
+        self,
+        user_id: str,
+        session_id: str,
+        message_data: MessageCreate,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Send a message and get AI response"""
         try:
             # Verify session belongs to user
@@ -204,7 +210,10 @@ class ChatService:
             # Get AI response
             ai_response = await ai_service.generate_chat_response(
                 message_data.content,
-                {"chat_history": chat_history}
+                {
+                    "chat_history": chat_history,
+                    "image_urls": (context or {}).get("image_urls", []),
+                }
             )
             
             # Create bot message

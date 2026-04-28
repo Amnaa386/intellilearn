@@ -13,6 +13,7 @@ Intellilearn(FRONTEND)/.env.*
 
 # Python artifacts
 intellilearn-backend/.venv/
+intellilearn-backend/uploads/
 **/__pycache__/
 *.pyc
 

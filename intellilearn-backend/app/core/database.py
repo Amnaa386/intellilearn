@@ -25,8 +25,13 @@ async def connect_to_database():
 
         if not firebase_admin._apps:
             init_kwargs = {"credential": cred}
+            options = {}
             if settings.FIREBASE_PROJECT_ID:
-                init_kwargs["options"] = {"projectId": settings.FIREBASE_PROJECT_ID}
+                options["projectId"] = settings.FIREBASE_PROJECT_ID
+            if settings.FIREBASE_STORAGE_BUCKET:
+                options["storageBucket"] = settings.FIREBASE_STORAGE_BUCKET
+            if options:
+                init_kwargs["options"] = options
             initialize_app(**init_kwargs)
 
         database = firestore.client()

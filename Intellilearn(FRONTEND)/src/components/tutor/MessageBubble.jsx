@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Cpu } from 'lucide-react';
+import { Cpu, File as FileIcon, Image as ImageIcon, Music } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StructuredLessonMessage from './StructuredLessonMessage';
@@ -61,6 +61,19 @@ export default function MessageBubble({ message, isDarkMode = true }) {
     window.addEventListener('intellilearn-user-updated', hydrateUser);
     return () => window.removeEventListener('intellilearn-user-updated', hydrateUser);
   }, [sanitizeAvatar]);
+
+  const attachments = React.useMemo(() => {
+    if (Array.isArray(message?.attachments) && message.attachments.length) return message.attachments;
+    if (message?.attachment) return [message.attachment];
+    return [];
+  }, [message?.attachments, message?.attachment]);
+
+  const getAttachmentKind = React.useCallback((type) => {
+    const rawType = String(type || '').toLowerCase();
+    if (rawType.includes('image')) return 'image';
+    if (rawType.includes('audio')) return 'audio';
+    return 'file';
+  }, []);
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -133,6 +146,36 @@ export default function MessageBubble({ message, isDarkMode = true }) {
                 </ReactMarkdown>
               </div>
             )
+          ) : null}
+          {isUser && attachments.length ? (
+            <div className={cn(message.content ? 'mt-2' : '', 'space-y-2')}>
+              {attachments.map((attachment, idx) => {
+                const kind = getAttachmentKind(attachment.type);
+                return (
+                  <div key={`${attachment.name || 'file'}-${idx}`} className="space-y-2">
+                    {kind === 'image' && attachment.previewUrl ? (
+                      <img
+                        src={attachment.previewUrl}
+                        alt={attachment.name || 'Attachment'}
+                        className="max-h-52 w-full rounded-md border border-white/20 object-cover"
+                      />
+                    ) : null}
+                    <div className="flex items-center gap-2 rounded-lg border border-white/20 bg-black/20 px-2.5 py-2 text-xs text-blue-100">
+                      <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-white/10">
+                        {kind === 'image' ? (
+                          <ImageIcon className="h-3.5 w-3.5" />
+                        ) : kind === 'audio' ? (
+                          <Music className="h-3.5 w-3.5" />
+                        ) : (
+                          <FileIcon className="h-3.5 w-3.5" />
+                        )}
+                      </span>
+                      <span className="truncate">{attachment.name || 'file'}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           ) : null}
           {hasPack ? (
             <div className={cn(message.content ? `mt-4 border-t ${isDarkMode ? 'border-slate-600/50' : 'border-slate-200'} pt-4` : '')}>

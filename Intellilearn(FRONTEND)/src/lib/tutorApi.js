@@ -1,7 +1,7 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
 const AUTH_ERROR_MESSAGE = 'Session expired. Please login again.';
 
-function handleUnauthorized() {
+export function handleUnauthorized() {
   try {
     localStorage.removeItem('intellilearn_access_token');
     localStorage.removeItem('intellilearn_refresh_token');
@@ -44,10 +44,10 @@ async function apiFetch(path, options = {}) {
   return response.json();
 }
 
-export async function askTutor(message, sessionId = null) {
+export async function askTutor(message, sessionId = null, context = null) {
   return apiFetch('/api/chat/ask-ai', {
     method: 'POST',
-    body: JSON.stringify({ message, sessionId }),
+    body: JSON.stringify({ message, sessionId, context }),
   });
 }
 

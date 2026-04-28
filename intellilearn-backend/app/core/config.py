@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     FIREBASE_PROJECT_ID: str = ""
     FIREBASE_CREDENTIALS_PATH: str = ""
     FIREBASE_CREDENTIALS_JSON: str = ""
+    FIREBASE_STORAGE_BUCKET: str = ""
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_STORAGE_BUCKET: str = "intellilearn-uploads"
     REDIS_URL: str = "redis://localhost:6379"
     
     # JWT
@@ -28,6 +32,7 @@ class Settings(BaseSettings):
     # Groq (free-tier friendly, same as old AI Tutor flow)
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [

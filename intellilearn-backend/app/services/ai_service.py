@@ -32,13 +32,20 @@ class AIService:
         else:
             logger.warning("No AI provider key configured (Groq/OpenAI)")
 
-    async def _chat_completion(self, messages: List[Dict[str, str]], max_tokens: int = 1000, temperature: float = 0.7):
+    async def _chat_completion(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        model_override: Optional[str] = None,
+    ):
         """Call Groq first (free-friendly), fallback to OpenAI."""
         if self.has_groq:
             try:
                 # Keep request lighter for free-tier TPM limits.
                 effective_messages = messages[-8:] if len(messages) > 8 else messages
                 safe_max_tokens = min(max_tokens, 600)
+                selected_model = model_override or settings.GROQ_MODEL
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     resp = await client.post(
                         "https://api.groq.com/openai/v1/chat/completions",
@@ -47,7 +54,7 @@ class AIService:
                             "Content-Type": "application/json",
                         },
                         json={
-                            "model": settings.GROQ_MODEL,
+                            "model": selected_model,
                             "messages": effective_messages,
                             "max_tokens": safe_max_tokens,
                             "temperature": temperature,
@@ -64,6 +71,8 @@ class AIService:
                 logger.warning(f"Groq failed, trying OpenAI fallback: {e}")
 
         if self.has_openai:
+            if model_override:
+                logger.warning("Vision model override requested, but OpenAI fallback path is text-only.")
             response = await openai.ChatCompletion.acreate(
                 model=settings.OPENAI_MODEL,
                 messages=messages,
@@ -117,7 +126,29 @@ class AIService:
                 "content": message
             })
             
-            provider, response = await self._chat_completion(messages, max_tokens=1000, temperature=0.7)
+            image_urls: List[str] = []
+            if context and isinstance(context.get("image_urls"), list):
+                image_urls = [u for u in context["image_urls"] if isinstance(u, str) and u.strip()]
+
+            # Vision-capable path (Groq multimodal) when user sends images.
+            if image_urls and self.has_groq:
+                vision_content = [{"type": "text", "text": message}]
+                for image_url in image_urls[:3]:
+                    vision_content.append({"type": "image_url", "image_url": {"url": image_url}})
+
+                vision_messages: List[Dict[str, Any]] = [messages[0]]
+                if context and context.get("chat_history"):
+                    vision_messages.extend(context["chat_history"])
+                vision_messages.append({"role": "user", "content": vision_content})
+
+                provider, response = await self._chat_completion(
+                    vision_messages,
+                    max_tokens=900,
+                    temperature=0.5,
+                    model_override=settings.GROQ_VISION_MODEL,
+                )
+            else:
+                provider, response = await self._chat_completion(messages, max_tokens=1000, temperature=0.7)
             
             if provider == "groq":
                 ai_message = response["choices"][0]["message"]["content"]

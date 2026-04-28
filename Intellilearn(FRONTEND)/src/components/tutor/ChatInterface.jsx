@@ -2,19 +2,26 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation } from 'lucide-react';
+import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation, X, Image as ImageIcon, Music, File } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import MessageBubble from './MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { askTutor, autoTitleTutorSession, updateTutorSessionTitle } from '@/lib/tutorApi';
+import { askTutor, autoTitleTutorSession, updateTutorSessionTitle, handleUnauthorized } from '@/lib/tutorApi';
 
 export default function ChatInterface({ messages, setMessages, isDarkMode = true, sessionIdRef, autoTitleNextMessage = false, onAutoTitleConsumed = null }) {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isRequestingMic, setIsRequestingMic] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState([]);
   const [apiError, setApiError] = useState('');
   const messagesEndRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const fileInputRef = useRef(null);
   const navigate = useNavigate();
 
   const scrollToBottom = () => {
@@ -24,6 +31,225 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      typeof window !== 'undefined'
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
+
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      return;
+    }
+
+    setVoiceSupported(true);
+    const recognition = new SpeechRecognition();
+    recognition.lang = (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : 'en-US';
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    recognition.onresult = (event) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        finalTranscript += event.results[i][0].transcript;
+      }
+      const cleaned = finalTranscript.trim();
+      if (cleaned) {
+        setInput(cleaned);
+      }
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      const reason = event?.error;
+      if (reason === 'not-allowed' || reason === 'service-not-allowed') {
+        setApiError('Microphone permission denied. Please allow mic access in browser settings.');
+      } else if (reason === 'audio-capture') {
+        setApiError('No microphone detected. Please connect a mic and try again.');
+      } else if (reason === 'no-speech') {
+        setApiError('No speech detected. Try speaking a bit louder.');
+      } else {
+        setApiError('Voice input failed. Please try again.');
+      }
+    };
+
+    recognitionRef.current = recognition;
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // ignore cleanup errors
+      }
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  const handleVoiceInput = async () => {
+    if (!voiceSupported || !recognitionRef.current) {
+      setApiError('Voice input is not supported in this browser.');
+      return;
+    }
+
+    try {
+      setApiError('');
+      if (isListening) {
+        recognitionRef.current.stop();
+        setIsListening(false);
+      } else {
+        if (!navigator?.mediaDevices?.getUserMedia) {
+          setApiError('Microphone API not available in this browser.');
+          return;
+        }
+        setIsRequestingMic(true);
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+        recognitionRef.current.start();
+        setIsListening(true);
+      }
+    } catch (error) {
+      setIsListening(false);
+      if (error?.name === 'NotAllowedError') {
+        setApiError('Microphone permission denied. Please allow mic access and retry.');
+      } else {
+        setApiError('Unable to start voice input. Please try again.');
+      }
+    } finally {
+      setIsRequestingMic(false);
+    }
+  };
+
+  const getUploadPathForFile = (file) => {
+    const name = (file?.name || '').toLowerCase();
+    const type = (file?.type || '').toLowerCase();
+    if (type.startsWith('image/')) return '/api/upload/image';
+    if (type.startsWith('audio/')) return '/api/upload/audio';
+    if (name.endsWith('.ppt') || name.endsWith('.pptx')) return '/api/upload/presentation';
+    if (
+      name.endsWith('.pdf') ||
+      name.endsWith('.doc') ||
+      name.endsWith('.docx') ||
+      name.endsWith('.txt')
+    ) return '/api/upload/document';
+    return '';
+  };
+
+  const handleAttachmentButtonClick = () => {
+    if (isUploadingAttachment) return;
+    setApiError('');
+    fileInputRef.current?.click();
+  };
+
+  const getAttachmentMeta = (file) => {
+    const rawType = String(file?.type || '').toLowerCase();
+    const isImage = rawType.includes('image');
+    const isAudio = rawType.includes('audio');
+    if (isImage) return { label: 'Image', icon: ImageIcon };
+    if (isAudio) return { label: 'Audio', icon: Music };
+    return { label: 'File', icon: File };
+  };
+
+  const getResolvedFileUrl = (apiBase, url) => {
+    if (!url) return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    return `${apiBase}${url}`;
+  };
+
+  const handleAttachmentSelect = async (event) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!selectedFiles.length) return;
+
+    const token = localStorage.getItem('intellilearn_access_token') || '';
+    if (!token) {
+      setApiError('Session missing. Please login again.');
+      return;
+    }
+
+    try {
+      setApiError('');
+      setIsUploadingAttachment(true);
+      const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+
+      const draftItems = selectedFiles.map((file) => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        type: file.type || 'file',
+        url: '',
+        previewUrl: file.type?.startsWith('image/') ? URL.createObjectURL(file) : '',
+        status: 'uploading',
+      }));
+      setAttachedFiles((prev) => [...prev, ...draftItems]);
+
+      const failedNames = [];
+      for (const file of selectedFiles) {
+        const item = draftItems.find((entry) => entry.name === file.name && entry.type === (file.type || 'file') && entry.status === 'uploading');
+        const uploadPath = getUploadPathForFile(file);
+        if (!uploadPath) {
+          if (item) {
+            setAttachedFiles((prev) => prev.filter((entry) => entry.id !== item.id));
+          }
+          failedNames.push(file.name);
+          continue;
+        }
+        const form = new FormData();
+        form.append('file', file);
+        if (uploadPath === '/api/upload/image') {
+          form.append('description', 'Uploaded from tutor chat');
+        }
+
+        const response = await fetch(`${apiBase}${uploadPath}`, {
+          method: 'POST',
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: form,
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!response.ok) {
+          if (item) {
+            setAttachedFiles((prev) => prev.filter((entry) => entry.id !== item.id));
+          }
+          failedNames.push(file.name);
+          continue;
+        }
+        if (item) {
+          setAttachedFiles((prev) =>
+            prev.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    name: payload?.filename || file.name,
+                    type: payload?.fileType || file.type || 'file',
+                    url: getResolvedFileUrl(apiBase, payload?.url),
+                    status: 'uploaded',
+                  }
+                : entry
+            )
+          );
+        }
+      }
+
+      if (failedNames.length) {
+        const msg = `Some files failed to upload: ${failedNames.join(', ')}`;
+        setApiError(msg);
+        window.alert(msg);
+      }
+    } catch (error) {
+      setApiError(error?.message || 'Unable to upload attachment.');
+    } finally {
+      setIsUploadingAttachment(false);
+    }
+  };
 
   const handleGenerateNotesFromChat = async () => {
     if (messages.length < 2 || isGeneratingNotes) return;
@@ -83,25 +309,56 @@ ${convo}`;
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
-    const outgoingText = input.trim();
+    if ((!input.trim() && attachedFiles.length === 0) || isLoading) return;
+    const sanitizedInput = input
+      .replace(/^Use this attached file as context:\s*.*$/gim, '')
+      .trim();
+    const outgoingText = sanitizedInput;
     const hadExistingSession = Boolean(sessionIdRef?.current);
+    const readyFiles = attachedFiles.filter((file) => file.status === 'uploaded');
+    const imageUrls = readyFiles
+      .filter((file) => String(file.type || '').toLowerCase().includes('image') && file.url)
+      .map((file) => file.url);
+    const hasImageAttachment = imageUrls.length > 0;
+    const attachmentMetaPrompt = readyFiles.length
+      ? `\n\nUser attached files:\n${readyFiles
+          .map((file) => `- name: ${file.name}\n- type: ${file.type}`)
+          .join('\n')}${
+          hasImageAttachment ? '\n- note: Please analyze attached image(s) carefully and answer using visual details.' : ''
+        }`
+      : '';
+    const payloadText = `${outgoingText || 'Please use the attached file as context.'}${attachmentMetaPrompt}`.trim();
 
     // Add user message
     const userMessage = {
       id: Date.now().toString(),
       type: 'user',
-      content: input,
+      content: outgoingText || '',
+      attachments: readyFiles.map((file) => ({
+        name: file.name,
+        type: file.type,
+        previewUrl: file.url || file.previewUrl || '',
+      })),
       timestamp: new Date(),
     };
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
+    readyFiles.forEach((file) => {
+      if (file?.previewUrl && file.previewUrl.startsWith('blob:')) {
+        setTimeout(() => URL.revokeObjectURL(file.previewUrl), 60000);
+      }
+    });
+    setAttachedFiles([]);
     setIsLoading(true);
     setApiError('');
 
     try {
-      const data = await askTutor(outgoingText, sessionIdRef?.current || null);
+      const data = await askTutor(
+        payloadText,
+        sessionIdRef?.current || null,
+        hasImageAttachment ? { image_urls: imageUrls } : null,
+      );
       if (data?.sessionId && sessionIdRef) {
         sessionIdRef.current = data.sessionId;
         try {
@@ -112,7 +369,8 @@ ${convo}`;
 
         // ChatGPT-style behavior: first user message becomes session title.
         if (!hadExistingSession) {
-          const title = outgoingText.length > 36 ? `${outgoingText.slice(0, 36).trim()}...` : outgoingText;
+          const titleSeed = outgoingText || `Attached: ${readyFiles[0]?.name || 'file'}`;
+          const title = titleSeed.length > 36 ? `${titleSeed.slice(0, 36).trim()}...` : titleSeed;
           try {
             await updateTutorSessionTitle(data.sessionId, title || 'New Chat');
           } catch {
@@ -246,14 +504,34 @@ ${convo}`;
             <Button
               size="icon"
               variant="outline"
-              className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}
+              type="button"
+              onClick={handleAttachmentButtonClick}
+              disabled={isUploadingAttachment}
+              className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50 disabled:opacity-60' : 'border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-60'}
             >
               <Paperclip className="w-4 h-4" />
             </Button>
             <Button
               size="icon"
               variant="outline"
-              className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}
+              type="button"
+              onClick={handleVoiceInput}
+              className={
+                isListening
+                  ? (isDarkMode
+                    ? 'border-rose-400/50 bg-rose-500/20 text-rose-200 hover:bg-rose-500/30'
+                    : 'border-rose-300 bg-rose-50 text-rose-600 hover:bg-rose-100')
+                  : (isDarkMode
+                    ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-100')
+              }
+              title={
+                !voiceSupported
+                  ? 'Voice input not supported in this browser'
+                  : isListening
+                    ? 'Stop listening'
+                    : 'Start voice input'
+              }
             >
               <Mic className="w-4 h-4" />
             </Button>
@@ -281,13 +559,83 @@ ${convo}`;
             />
             <Button
               type="submit"
-              disabled={isLoading || !input.trim()}
+              disabled={isLoading || (!input.trim() && attachedFiles.length === 0) || isUploadingAttachment}
               size="icon"
               className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
             >
               <Send className="w-4 h-4" />
             </Button>
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            multiple
+            accept="image/*,audio/*,.pdf,.doc,.docx,.txt,.ppt,.pptx"
+            onChange={handleAttachmentSelect}
+          />
+          {isUploadingAttachment ? (
+            <p className={`text-xs ${isDarkMode ? 'text-blue-300' : 'text-blue-600'}`}>
+              Uploading attachment...
+            </p>
+          ) : null}
+          {attachedFiles.length ? (
+            <div className="flex flex-wrap gap-2">
+              {attachedFiles.map((file) => {
+                const meta = getAttachmentMeta(file);
+                const IconComp = meta.icon;
+                return (
+                  <div
+                    key={file.id}
+                    className={`inline-flex max-w-[280px] items-center gap-2 rounded-xl border px-2.5 py-2 ${
+                      isDarkMode ? 'border-slate-700 bg-slate-900/70' : 'border-slate-200 bg-slate-50'
+                    }`}
+                  >
+                    <span
+                      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                        isDarkMode ? 'bg-slate-800 text-slate-200' : 'bg-white text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      <IconComp className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className={`truncate text-xs font-semibold ${isDarkMode ? 'text-slate-100' : 'text-slate-800'}`}>
+                        {file.name}
+                      </p>
+                      <p className={`text-[11px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        {file.status === 'uploading' ? 'Uploading...' : meta.label}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Remove attachment"
+                      onClick={() => {
+                        if (file?.previewUrl && file.previewUrl.startsWith('blob:')) {
+                          URL.revokeObjectURL(file.previewUrl);
+                        }
+                        setAttachedFiles((prev) => prev.filter((item) => item.id !== file.id));
+                      }}
+                      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+                        isDarkMode ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-500 hover:bg-slate-200'
+                      }`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+          {isRequestingMic ? (
+            <p className={`text-xs ${isDarkMode ? 'text-blue-300' : 'text-blue-600'}`}>
+              Requesting microphone permission...
+            </p>
+          ) : null}
+          {isListening ? (
+            <p className={`text-xs ${isDarkMode ? 'text-rose-300' : 'text-rose-600'}`}>
+              Listening... speak now, then tap mic again to stop.
+            </p>
+          ) : null}
         </form>
 
         {/* Quick Actions */}
