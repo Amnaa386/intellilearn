@@ -22,6 +22,29 @@ async def get_user_analytics(current_user: dict = Depends(get_current_user)):
             detail="Failed to retrieve user analytics"
         )
 
+@router.get("/user/activity-logs")
+async def get_user_activity_logs(
+    page: int = Query(1, ge=1),
+    limit: int = Query(100, ge=1, le=500),
+    action: str = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get user's own activity logs"""
+    try:
+        logs = await analytics_service.get_user_activity_logs(
+            user_id=current_user["id"],
+            page=page,
+            limit=limit,
+            action=action,
+        )
+        return logs
+    except Exception as e:
+        logger.error(f"Error getting user activity logs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve user activity logs"
+        )
+
 @router.get("/user/progress")
 async def get_user_progress(
     timeframe: Timeframe = Query(Timeframe.WEEK),

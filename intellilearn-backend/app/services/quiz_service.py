@@ -45,7 +45,10 @@ class QuizService:
                 content["topic"],
                 question_count,
                 difficulty.value,
-                [qt.value for qt in question_types]
+                [qt.value for qt in question_types],
+                content_context=content.get("content"),
+                cache_scope=f"{source.value}:{content.get('sourceId') or 'none'}",
+                use_cache=(source != QuizSource.CHAT),
             )
             
             # Create quiz document
@@ -92,12 +95,17 @@ class QuizService:
                 raise ValueError("Chat session not found")
             
             # Ensure messages exist for context
-            messages = list(db.collection("messages").where("sessionId", "==", session_id).stream())
-            if not messages:
+            message_docs = list(db.collection("messages").where("sessionId", "==", session_id).stream())
+            if not message_docs:
                 raise ValueError("No chat messages found for this session")
-            
-            # Extract content from messages
-            content_text = " ".join([msg["content"] for msg in messages if msg["type"] == "user"])
+
+            # Extract content from Firestore snapshots safely
+            messages = [doc.to_dict() or {} for doc in message_docs]
+            content_text = " ".join(
+                [str(msg.get("content", "")) for msg in messages if msg.get("type") == "user"]
+            )
+            if not content_text.strip():
+                content_text = "General chat-based learning discussion"
             
             # Generate quiz
             question_types = [QuestionType.MCQ] if mode == "mcq" else [QuestionType.WRITTEN]

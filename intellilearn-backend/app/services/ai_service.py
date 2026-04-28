@@ -1,4 +1,4 @@
-import openai
+from openai import AsyncOpenAI
 from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime
@@ -7,6 +7,8 @@ from app.core.redis import set_cache, get_cache
 import json
 import hashlib
 import httpx
+import ast
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +21,9 @@ class AIService:
     def __init__(self):
         self.has_groq = bool(settings.GROQ_API_KEY)
         self.has_openai = bool(settings.OPENAI_API_KEY)
+        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if self.has_openai else None
 
-        if settings.OPENAI_API_KEY:
-            openai.api_key = settings.OPENAI_API_KEY
-        elif not self.has_groq:
+        if not self.has_openai and not self.has_groq:
             logger.warning("OpenAI API key not configured")
         
         if self.has_groq:
@@ -66,26 +67,43 @@ class AIService:
                     raise RuntimeError(f"Groq error {resp.status_code}: {resp.text}")
                 return "groq", resp.json()
             except Exception as e:
-                if isinstance(e, AIRateLimitError) and not self.has_openai:
-                    raise
-                logger.warning(f"Groq failed, trying OpenAI fallback: {e}")
+                # User preference: when Groq is configured, keep provider strict to Groq only.
+                logger.error(f"Groq request failed: {e}")
+                raise
 
         if self.has_openai:
             if model_override:
                 logger.warning("Vision model override requested, but OpenAI fallback path is text-only.")
-            response = await openai.ChatCompletion.acreate(
+            response = await self.openai_client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 presence_penalty=0.1,
-                frequency_penalty=0.1
+                frequency_penalty=0.1,
             )
             return "openai", response
 
         if self.has_groq and not self.has_openai:
             raise AIRateLimitError("AI is temporarily busy due to rate limits. Please retry in 3-5 seconds.")
         raise RuntimeError("No AI provider configured. Set GROQ_API_KEY or OPENAI_API_KEY.")
+
+    @staticmethod
+    def _extract_content_and_usage(provider: str, response: Any):
+        if provider == "groq":
+            message = response["choices"][0]["message"]["content"]
+            usage = response.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            return message, prompt_tokens, completion_tokens, total_tokens
+
+        message = response.choices[0].message.content
+        usage = response.usage
+        prompt_tokens = getattr(usage, "prompt_tokens", 0)
+        completion_tokens = getattr(usage, "completion_tokens", 0)
+        total_tokens = getattr(usage, "total_tokens", prompt_tokens + completion_tokens)
+        return message, prompt_tokens, completion_tokens, total_tokens
     
     async def generate_chat_response(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Generate AI chat response using OpenAI"""
@@ -150,18 +168,7 @@ class AIService:
             else:
                 provider, response = await self._chat_completion(messages, max_tokens=1000, temperature=0.7)
             
-            if provider == "groq":
-                ai_message = response["choices"][0]["message"]["content"]
-                usage = response.get("usage", {})
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
-                total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-            else:
-                ai_message = response.choices[0].message.content
-                usage = response.usage
-                prompt_tokens = usage.prompt_tokens
-                completion_tokens = usage.completion_tokens
-                total_tokens = usage.total_tokens
+            ai_message, prompt_tokens, completion_tokens, total_tokens = self._extract_content_and_usage(provider, response)
             
             result = {
                 "message": ai_message,
@@ -231,14 +238,12 @@ class AIService:
                 }
             ]
             
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
+            provider, response = await self._chat_completion(
+                messages,
                 max_tokens=2000 if complexity == "detailed" else 800,
-                temperature=0.3
+                temperature=0.3,
             )
-            
-            content = response.choices[0].message.content
+            content, prompt_tokens, completion_tokens, total_tokens = self._extract_content_and_usage(provider, response)
             
             result = {
                 "title": f"Study Notes: {topic}",
@@ -246,9 +251,10 @@ class AIService:
                 "type": complexity,
                 "generatedAt": datetime.utcnow().isoformat(),
                 "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
                 }
             }
             
@@ -261,15 +267,27 @@ class AIService:
             logger.error(f"Error generating notes: {e}")
             raise
     
-    async def generate_quiz(self, topic: str, question_count: int = 5, difficulty: str = "medium", question_types: List[str] = ["mcq"]) -> Dict[str, Any]:
+    async def generate_quiz(
+        self,
+        topic: str,
+        question_count: int = 5,
+        difficulty: str = "medium",
+        question_types: List[str] = ["mcq"],
+        content_context: Optional[str] = None,
+        cache_scope: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
         """Generate AI quiz questions"""
         try:
-            cache_key = f"quiz:{hashlib.md5(f'{topic}_{question_count}_{difficulty}_{"".join(question_types)}'.encode()).hexdigest()}"
+            context_hash = hashlib.md5((content_context or "").encode()).hexdigest()[:10]
+            scoped = cache_scope or "default"
+            cache_key = f"quiz:{hashlib.md5(f'{topic}_{question_count}_{difficulty}_{"".join(question_types)}_{scoped}_{context_hash}'.encode()).hexdigest()}"
             
             # Try cache first
-            cached_quiz = await get_cache(cache_key)
-            if cached_quiz:
-                return cached_quiz
+            if use_cache:
+                cached_quiz = await get_cache(cache_key)
+                if cached_quiz:
+                    return cached_quiz
             
             # Build prompt based on question types
             prompt_parts = [f"Generate {question_count} quiz questions about: {topic}"]
@@ -283,10 +301,18 @@ class AIService:
             
             prompt_parts.extend([
                 f"Difficulty level: {difficulty}",
+                "Language: English only",
                 "Format as JSON with the following structure:",
                 '{"questions": [{"id": "q1", "type": "mcq", "question": "...", "options": ["...", "...", "...", "..."], "correct": 0, "explanation": "..."}]}',
-                "Ensure all questions are clear and accurate"
+                "Ensure all questions are clear, accurate, and NON-REPETITIVE",
+                "Do not repeat the same question stem across items"
             ])
+            if content_context:
+                prompt_parts.extend([
+                    "Use this chat/note context as the source of truth for question ideas:",
+                    str(content_context)[:1800],
+                    "Avoid creating multiple questions that test the exact same fact.",
+                ])
             
             prompt = "\n".join(prompt_parts)
             
@@ -301,26 +327,43 @@ class AIService:
                 }
             ]
             
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=1500,
-                temperature=0.4
+            provider, response = await self._chat_completion(messages, max_tokens=1500, temperature=0.4)
+            content, prompt_tokens, completion_tokens, total_tokens = self._extract_content_and_usage(provider, response)
+            
+            # Parse JSON response robustly (Groq/OpenAI may include markdown fences or minor JSON issues)
+            quiz_data = await self._parse_quiz_json_or_raise(content)
+            normalized_questions = self._normalize_questions(
+                quiz_data.get("questions", []),
+                topic=topic,
+                question_count=question_count,
+                question_types=question_types,
             )
-            
-            content = response.choices[0].message.content
-            
-            # Parse JSON response
-            try:
-                quiz_data = json.loads(content)
-            except json.JSONDecodeError:
-                # If JSON parsing fails, try to extract JSON from the text
-                import re
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    quiz_data = json.loads(json_match.group())
-                else:
-                    raise ValueError("Failed to parse quiz JSON from AI response")
+            desired_count = max(1, min(int(question_count or 5), 20))
+
+            # If model returns too few valid/unique questions, request only missing ones (no deterministic fallback).
+            retries = 0
+            while len(normalized_questions) < desired_count and retries < 2:
+                missing = desired_count - len(normalized_questions)
+                extra_raw = await self._generate_additional_quiz_questions(
+                    topic=topic,
+                    difficulty=difficulty,
+                    question_types=question_types,
+                    missing_count=missing,
+                    existing_questions=normalized_questions,
+                )
+                merged = normalized_questions + extra_raw
+                normalized_questions = self._normalize_questions(
+                    merged,
+                    topic=topic,
+                    question_count=question_count,
+                    question_types=question_types,
+                )
+                retries += 1
+
+            if len(normalized_questions) < desired_count:
+                raise ValueError("AI returned insufficient valid quiz questions. Please regenerate.")
+
+            quiz_data["questions"] = normalized_questions
             
             result = {
                 "questions": quiz_data.get("questions", []),
@@ -329,20 +372,206 @@ class AIService:
                 "questionCount": len(quiz_data.get("questions", [])),
                 "generatedAt": datetime.utcnow().isoformat(),
                 "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
                 }
             }
             
             # Cache the result
-            await set_cache(cache_key, result, 3600)  # Cache for 1 hour
+            if use_cache:
+                await set_cache(cache_key, result, 3600)  # Cache for 1 hour
             
             return result
             
         except Exception as e:
             logger.error(f"Error generating quiz: {e}")
             raise
+
+    def _safe_parse_json_object(self, raw: str) -> Dict[str, Any]:
+        """Parse first JSON object from model text with light repair."""
+        if not raw:
+            return {}
+        text = str(raw).strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        parsed = self._coerce_quiz_payload(text)
+        if parsed:
+            return parsed
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            list_start = text.find("[")
+            list_end = text.rfind("]")
+            if list_start != -1 and list_end != -1 and list_end > list_start:
+                list_candidate = text[list_start:list_end + 1]
+                parsed_list = self._coerce_quiz_payload(list_candidate)
+                return parsed_list if parsed_list else {}
+            return {}
+
+        candidate = text[start:end + 1]
+        parsed_candidate = self._coerce_quiz_payload(candidate)
+        if parsed_candidate:
+            return parsed_candidate
+
+        # minimal JSON repair: remove trailing commas before closing braces/brackets
+        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+        repaired_parsed = self._coerce_quiz_payload(repaired)
+        return repaired_parsed if repaired_parsed else {}
+
+    def _coerce_quiz_payload(self, text: str) -> Dict[str, Any]:
+        """Coerce model output into {'questions': [...]} when possible."""
+        if not text:
+            return {}
+
+        def _convert_loaded(loaded: Any) -> Dict[str, Any]:
+            if isinstance(loaded, dict):
+                questions = loaded.get("questions")
+                if isinstance(questions, list):
+                    return loaded
+                return {}
+            if isinstance(loaded, list):
+                return {"questions": loaded}
+            return {}
+
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                loaded = parser(text)
+                converted = _convert_loaded(loaded)
+                if converted:
+                    return converted
+            except Exception:
+                continue
+        return {}
+
+    async def _parse_quiz_json_or_raise(self, raw: str) -> Dict[str, Any]:
+        """Parse quiz JSON; if broken, ask model to repair into strict JSON."""
+        parsed = self._safe_parse_json_object(raw)
+        if isinstance(parsed.get("questions"), list) and parsed.get("questions"):
+            return parsed
+
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You repair malformed JSON. Return ONLY valid JSON object with key 'questions'. "
+                    "No markdown, no prose."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Fix this malformed quiz output into strict JSON.\n\n"
+                    "Required format:\n"
+                    "{\"questions\": [{\"id\":\"q1\",\"type\":\"mcq\",\"question\":\"...\","
+                    "\"options\":[\"...\",\"...\",\"...\",\"...\"],\"correct\":0,\"explanation\":\"...\"}]}\n\n"
+                    f"Malformed output:\n{str(raw)[:7000]}"
+                ),
+            },
+        ]
+        provider, repaired_response = await self._chat_completion(
+            repair_messages,
+            max_tokens=1800,
+            temperature=0.0,
+        )
+        repaired_text, _, _, _ = self._extract_content_and_usage(provider, repaired_response)
+        repaired = self._safe_parse_json_object(repaired_text)
+        if isinstance(repaired.get("questions"), list) and repaired.get("questions"):
+            return repaired
+        raise ValueError("Failed to parse valid quiz JSON from AI response.")
+
+    async def _generate_additional_quiz_questions(
+        self,
+        topic: str,
+        difficulty: str,
+        question_types: List[str],
+        missing_count: int,
+        existing_questions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        existing_stems = [str(q.get("question", "")).strip() for q in existing_questions if q.get("question")]
+        types_text = ", ".join(question_types) if question_types else "mcq"
+        prompt = (
+            f"Generate exactly {missing_count} additional UNIQUE quiz questions in English on topic: {topic}.\n"
+            f"Difficulty: {difficulty}\n"
+            f"Allowed types: {types_text}\n"
+            "Return ONLY JSON object with key 'questions'.\n"
+            "Do NOT repeat or paraphrase these existing question stems:\n"
+            + "\n".join([f"- {s}" for s in existing_stems[:20]])
+            + "\n\nJSON format:\n"
+            "{\"questions\": [{\"id\":\"qX\",\"type\":\"mcq\",\"question\":\"...\","
+            "\"options\":[\"...\",\"...\",\"...\",\"...\"],\"correct\":0,\"explanation\":\"...\"}]}"
+        )
+        messages = [
+            {"role": "system", "content": "You are an expert quiz generator. Return strict JSON only."},
+            {"role": "user", "content": prompt},
+        ]
+        provider, response = await self._chat_completion(messages, max_tokens=1300, temperature=0.2)
+        text, _, _, _ = self._extract_content_and_usage(provider, response)
+        parsed = await self._parse_quiz_json_or_raise(text)
+        return parsed.get("questions", [])
+
+    def _normalize_questions(
+        self,
+        questions: List[Dict[str, Any]],
+        topic: str,
+        question_count: int,
+        question_types: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Ensure quiz questions are valid, unique, and complete."""
+        desired_count = max(1, min(int(question_count or 5), 20))
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+
+        for idx, q in enumerate(questions):
+            if not isinstance(q, dict):
+                continue
+            qtype = str(q.get("type") or "mcq").lower()
+            if qtype not in {"mcq", "written", "true_false"}:
+                qtype = "mcq"
+            text = str(q.get("question") or "").strip()
+            if not text:
+                continue
+            dedupe_key = text.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            row = {
+                "id": q.get("id") or f"q{len(normalized) + 1}",
+                "type": qtype,
+                "question": text,
+            }
+
+            if qtype == "mcq":
+                options = q.get("options") if isinstance(q.get("options"), list) else []
+                options = [str(opt).strip() for opt in options if str(opt).strip()]
+                if len(options) < 4:
+                    options = [
+                        f"It represents a core idea in {topic}.",
+                        f"It is unrelated to {topic}.",
+                        "It has no practical use.",
+                        "It cannot be defined clearly.",
+                    ]
+                row["options"] = options[:4]
+                correct = q.get("correct", 0)
+                row["correct"] = int(correct) if isinstance(correct, int) and 0 <= int(correct) <= 3 else 0
+                row["explanation"] = str(q.get("explanation") or f"{topic} involves key principles and applications.")
+            elif qtype == "written":
+                row["minLength"] = int(q.get("minLength") or 50)
+                row["hintPool"] = q.get("hintPool") if isinstance(q.get("hintPool"), list) else []
+            else:
+                row["correct_bool"] = bool(q.get("correct_bool", True))
+                row["explanation"] = str(q.get("explanation") or "")
+
+            normalized.append(row)
+            if len(normalized) >= desired_count:
+                break
+
+        return normalized
     
     async def explain_ppt_slide(self, slide_content: str, slide_number: int, context: Optional[str] = None) -> Dict[str, Any]:
         """Explain PowerPoint slide content"""
@@ -373,23 +602,18 @@ class AIService:
                 }
             ]
             
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=500,
-                temperature=0.5
-            )
-            
-            explanation = response.choices[0].message.content
+            provider, response = await self._chat_completion(messages, max_tokens=500, temperature=0.5)
+            explanation, prompt_tokens, completion_tokens, total_tokens = self._extract_content_and_usage(provider, response)
             
             result = {
                 "explanation": explanation,
                 "slideNumber": slide_number,
                 "keyPoints": self._extract_key_points(explanation),
                 "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
                 }
             }
             
@@ -439,14 +663,12 @@ class AIService:
                 }
             ]
             
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=word_count * 2,  # Allow for formatting
+            provider, response = await self._chat_completion(
+                messages,
+                max_tokens=word_count * 2,
                 temperature=0.6
             )
-            
-            script = response.choices[0].message.content
+            script, prompt_tokens, completion_tokens, total_tokens = self._extract_content_and_usage(provider, response)
             
             result = {
                 "script": script,
@@ -455,9 +677,10 @@ class AIService:
                 "style": style,
                 "estimatedWordCount": len(script.split()),
                 "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
+                    "provider": provider,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens
                 }
             }
             
@@ -502,14 +725,8 @@ class AIService:
                 }
             ]
             
-            response = await openai.ChatCompletion.acreate(
-                model=settings.OPENAI_MODEL,
-                messages=messages,
-                max_tokens=500,
-                temperature=0.3
-            )
-            
-            evaluation_text = response.choices[0].message.content
+            provider, response = await self._chat_completion(messages, max_tokens=500, temperature=0.3)
+            evaluation_text, _, _, _ = self._extract_content_and_usage(provider, response)
             
             # Parse JSON response
             try:

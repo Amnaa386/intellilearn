@@ -1,117 +1,253 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { 
-  BarChart3, 
-  MessageSquare, 
-  BrainCircuit, 
-  FileText, 
-  Presentation, 
-  TrendingUp, 
-  Sparkles, 
-  Clock, 
+import {
+  MessageSquare,
+  BrainCircuit,
+  FileText,
+  Presentation,
+  TrendingUp,
+  Clock,
   Target,
   Zap,
   Activity,
-  ArrowUpRight,
   ChevronRight,
-  Lightbulb,
-  Search
+  Search,
 } from 'lucide-react';
-import { 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  Cell,
-  PieChart,
-  Pie
 } from 'recharts';
+import {
+  getUserAnalyticsOverview,
+  getUserActivityLogs,
+  getChatStats,
+  getQuizStats,
+  getNotesStats,
+} from '@/lib/analyticsApi';
 
-// Dummy data for AI Interaction Tracking
-const timeRangeData = {
-  Daily: [
-    { day: '6 AM', interactions: 2, quizzes: 0, notes: 1 },
-    { day: '9 AM', interactions: 8, quizzes: 1, notes: 2 },
-    { day: '12 PM', interactions: 15, quizzes: 2, notes: 3 },
-    { day: '3 PM', interactions: 10, quizzes: 1, notes: 1 },
-    { day: '6 PM', interactions: 22, quizzes: 3, notes: 4 },
-    { day: '9 PM', interactions: 18, quizzes: 2, notes: 2 },
-    { day: '12 AM', interactions: 5, quizzes: 0, notes: 0 },
-  ],
-  Weekly: [
-    { day: 'Mon', interactions: 12, quizzes: 2, notes: 3 },
-    { day: 'Tue', interactions: 18, quizzes: 4, notes: 5 },
-    { day: 'Wed', interactions: 15, quizzes: 3, notes: 2 },
-    { day: 'Thu', interactions: 25, quizzes: 6, notes: 8 },
-    { day: 'Fri', interactions: 22, quizzes: 5, notes: 4 },
-    { day: 'Sat', interactions: 30, quizzes: 8, notes: 6 },
-    { day: 'Sun', interactions: 28, quizzes: 7, notes: 7 },
-  ],
-  Monthly: [
-    { day: 'Week 1', interactions: 85, quizzes: 12, notes: 15 },
-    { day: 'Week 2', interactions: 110, quizzes: 18, notes: 22 },
-    { day: 'Week 3', interactions: 95, quizzes: 15, notes: 18 },
-    { day: 'Week 4', interactions: 148, quizzes: 24, notes: 32 },
-  ]
+const FEATURE_COLORS = {
+  'AI Chat': '#8b5cf6',
+  'PPT Mode': '#3b82f6',
+  Quizzes: '#f59e0b',
+  Notes: '#10b981',
 };
 
-const featureUsage = [
-  { name: 'AI Chat', value: 45, color: '#8b5cf6' },
-  { name: 'PPT Mode', value: 25, color: '#3b82f6' },
-  { name: 'Quizzes', value: 20, color: '#f59e0b' },
-  { name: 'Notes', value: 10, color: '#10b981' },
-];
+function toDateSafe(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
-const recentActivities = [
-  { id: 1, type: 'chat', title: 'Asked about Quantum Entanglement', time: '10 mins ago', icon: MessageSquare, color: 'text-purple-400' },
-  { id: 2, type: 'quiz', title: 'Generated Quiz: Modern History', time: '45 mins ago', icon: BrainCircuit, color: 'text-amber-400' },
-  { id: 3, type: 'ppt', title: 'Requested PPT: Neural Networks', time: '2 hours ago', icon: Presentation, color: 'text-blue-400' },
-  { id: 4, type: 'notes', title: 'Created Notes: React Hooks', time: 'Yesterday', icon: FileText, color: 'text-emerald-400' },
-];
+function getActionMeta(action = '') {
+  if (action.startsWith('quiz_')) return { label: 'Quizzes', icon: BrainCircuit, color: 'text-amber-400' };
+  if (action.startsWith('notes_')) return { label: 'Notes', icon: FileText, color: 'text-emerald-400' };
+  if (action === 'ppt_explanation') return { label: 'PPT Mode', icon: Presentation, color: 'text-blue-400' };
+  return { label: 'AI Chat', icon: MessageSquare, color: 'text-purple-400' };
+}
 
-const aiInsights = [
-  { title: 'Learning Pattern', desc: 'You prefer visual learning. 60% of your interactions involve PPT or Video modes.', icon: TrendingUp },
-  { title: 'Area for Improvement', desc: 'Consistency in Quizzes. Try taking one short quiz daily to improve retention.', icon: Target },
-  { title: 'Top Topic', desc: 'Advanced Mathematics. You have explored 12 different sub-topics this week.', icon: Lightbulb },
-];
+function formatRelativeTime(value) {
+  const d = toDateSafe(value);
+  if (!d) return 'Unknown time';
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins} mins ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hours ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days} days ago`;
+}
+
+function buildTimeSeries(logs, range) {
+  const now = new Date();
+  if (range === 'Daily') {
+    const labels = ['6 AM', '9 AM', '12 PM', '3 PM', '6 PM', '9 PM', '12 AM'];
+    const bucketEdges = [6, 9, 12, 15, 18, 21, 24];
+    const counts = labels.map((day) => ({ day, interactions: 0 }));
+    logs.forEach((row) => {
+      const d = toDateSafe(row?.timestamp);
+      if (!d) return;
+      const isToday = d.toDateString() === now.toDateString();
+      if (!isToday) return;
+      const hour = d.getHours();
+      const idx = bucketEdges.findIndex((edge) => hour < edge);
+      if (idx >= 0) counts[idx].interactions += 1;
+    });
+    return counts;
+  }
+
+  if (range === 'Weekly') {
+    const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const monday = new Date(now);
+    const day = monday.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    monday.setDate(monday.getDate() + diff);
+    monday.setHours(0, 0, 0, 0);
+    const counts = labels.map((label, idx) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + idx);
+      return { day: label, stamp: d.getTime(), interactions: 0 };
+    });
+    logs.forEach((row) => {
+      const d = toDateSafe(row?.timestamp);
+      if (!d) return;
+      const dateOnly = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      const idx = counts.findIndex((x) => x.stamp === dateOnly);
+      if (idx >= 0) counts[idx].interactions += 1;
+    });
+    return counts.map(({ day: label, interactions }) => ({ day: label, interactions }));
+  }
+
+  const counts = [
+    { day: 'Week 1', interactions: 0 },
+    { day: 'Week 2', interactions: 0 },
+    { day: 'Week 3', interactions: 0 },
+    { day: 'Week 4', interactions: 0 },
+  ];
+  logs.forEach((row) => {
+    const d = toDateSafe(row?.timestamp);
+    if (!d) return;
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
+    if (diffDays < 0 || diffDays >= 28) return;
+    const weekIndex = 3 - Math.floor(diffDays / 7);
+    if (weekIndex >= 0 && weekIndex < 4) counts[weekIndex].interactions += 1;
+  });
+  return counts;
+}
 
 export default function AnalyticsPage() {
   const [timeRange, setTimeRange] = useState('Weekly');
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [overview, setOverview] = useState(null);
+  const [activityLogs, setActivityLogs] = useState([]);
+  const [chatStats, setChatStats] = useState(null);
+  const [quizStats, setQuizStats] = useState(null);
+  const [notesStats, setNotesStats] = useState(null);
   const navigate = useNavigate();
 
-  const getSummaryCards = (range) => {
-    const data = {
-      Daily: [
-        { label: 'AI Interactions', value: '18', trend: '+8%', icon: MessageSquare, color: 'from-purple-500 to-indigo-500' },
-        { label: 'Topics Explored', value: '4', trend: '+2', icon: Search, color: 'from-blue-500 to-cyan-500' },
-        { label: 'Quizzes Created', value: '3', trend: '+1', icon: BrainCircuit, color: 'from-orange-500 to-amber-500' },
-        { label: 'Engagement Score', value: '89', trend: 'High', icon: Zap, color: 'from-emerald-500 to-teal-500' },
-      ],
-      Weekly: [
-        { label: 'AI Interactions', value: '148', trend: '+12%', icon: MessageSquare, color: 'from-purple-500 to-indigo-500' },
-        { label: 'Topics Explored', value: '32', trend: '+5', icon: Search, color: 'from-blue-500 to-cyan-500' },
-        { label: 'Quizzes Created', value: '24', trend: '+8', icon: BrainCircuit, color: 'from-orange-500 to-amber-500' },
-        { label: 'Engagement Score', value: '94', trend: 'Elite', icon: Zap, color: 'from-emerald-500 to-teal-500' },
-      ],
-      Monthly: [
-        { label: 'AI Interactions', value: '612', trend: '+24%', icon: MessageSquare, color: 'from-purple-500 to-indigo-500' },
-        { label: 'Topics Explored', value: '127', trend: '+18', icon: Search, color: 'from-blue-500 to-cyan-500' },
-        { label: 'Quizzes Created', value: '89', trend: '+32', icon: BrainCircuit, color: 'from-orange-500 to-amber-500' },
-        { label: 'Engagement Score', value: '96', trend: 'Elite', icon: Zap, color: 'from-emerald-500 to-teal-500' },
-      ]
+  useEffect(() => {
+    let cancelled = false;
+    const loadAnalytics = async () => {
+      try {
+        setError('');
+        setIsLoading(true);
+        const [overviewRes, activityRes, chatRes, quizRes, notesRes] = await Promise.all([
+          getUserAnalyticsOverview(),
+          getUserActivityLogs({ page: 1, limit: 300 }),
+          getChatStats(),
+          getQuizStats(),
+          getNotesStats(),
+        ]);
+        if (cancelled) return;
+        setOverview(overviewRes || {});
+        setActivityLogs(Array.isArray(activityRes?.logs) ? activityRes.logs : []);
+        setChatStats(chatRes || {});
+        setQuizStats(quizRes || {});
+        setNotesStats(notesRes || {});
+      } catch (e) {
+        if (!cancelled) setError(e?.message || 'Failed to load analytics.');
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
     };
-    return data[range] || data.Weekly;
-  };
+    loadAnalytics();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const summaryCards = getSummaryCards(timeRange);
+  const timeSeries = useMemo(() => buildTimeSeries(activityLogs, timeRange), [activityLogs, timeRange]);
+  const interactionsCount = useMemo(() => {
+    const now = Date.now();
+    const windowDays = timeRange === 'Daily' ? 1 : timeRange === 'Weekly' ? 7 : 30;
+    return activityLogs.filter((row) => {
+      const d = toDateSafe(row?.timestamp);
+      if (!d) return false;
+      return now - d.getTime() <= windowDays * 86400000;
+    }).length;
+  }, [activityLogs, timeRange]);
+
+  const featureUsage = useMemo(() => {
+    const raw = {
+      'AI Chat': 0,
+      'PPT Mode': 0,
+      Quizzes: 0,
+      Notes: 0,
+    };
+    activityLogs.forEach((row) => {
+      const action = row?.action || '';
+      if (action.startsWith('quiz_')) raw.Quizzes += 1;
+      else if (action.startsWith('notes_')) raw.Notes += 1;
+      else if (action === 'ppt_explanation') raw['PPT Mode'] += 1;
+      else raw['AI Chat'] += 1;
+    });
+    const total = Object.values(raw).reduce((sum, x) => sum + x, 0) || 1;
+    return Object.entries(raw).map(([name, count]) => ({
+      name,
+      value: Math.round((count / total) * 100),
+      color: FEATURE_COLORS[name] || '#8b5cf6',
+    }));
+  }, [activityLogs]);
+
+  const recentActivities = useMemo(() => {
+    return activityLogs.slice(0, 5).map((row) => {
+      const meta = getActionMeta(row?.action);
+      const details = row?.details && typeof row.details === 'object' ? row.details : {};
+      const descriptor =
+        details.topic || details.title || details.source || details.noteId || details.quizId || details.sessionId || '';
+      return {
+        id: row?.id || `${row?.action || 'activity'}-${row?.timestamp || ''}`,
+        icon: meta.icon,
+        color: meta.color,
+        title: descriptor ? `${row?.action?.replaceAll('_', ' ') || 'Activity'}: ${descriptor}` : row?.action?.replaceAll('_', ' ') || 'Activity',
+        time: formatRelativeTime(row?.timestamp),
+      };
+    });
+  }, [activityLogs]);
+
+  const engagementScore = useMemo(() => {
+    const quizPerf = Number(quizStats?.averageScore || overview?.stats?.performance || 0);
+    const quizVolume = Number(quizStats?.totalQuizzes || 0);
+    const notesVolume = Number(notesStats?.totalNotes || 0);
+    const chats = Number(chatStats?.totalSessions || 0);
+    const activityFactor = Math.min(100, interactionsCount * 2);
+    const consistencyFactor = Math.min(100, (quizVolume + notesVolume + chats) * 4);
+    return Math.round((quizPerf * 0.5) + (activityFactor * 0.3) + (consistencyFactor * 0.2));
+  }, [quizStats, overview, notesStats, chatStats, interactionsCount]);
+
+  const summaryCards = [
+    { label: 'AI Interactions', value: String(interactionsCount), trend: `${timeRange} live`, icon: MessageSquare, color: 'from-purple-500 to-indigo-500' },
+    { label: 'Topics Explored', value: String(notesStats?.totalCategories || 0), trend: `${notesStats?.totalNotes || 0} notes`, icon: Search, color: 'from-blue-500 to-cyan-500' },
+    { label: 'Quizzes Created', value: String(quizStats?.totalQuizzes || 0), trend: `${quizStats?.totalQuestions || 0} questions`, icon: BrainCircuit, color: 'from-orange-500 to-amber-500' },
+    { label: 'Engagement Score', value: String(engagementScore), trend: engagementScore >= 85 ? 'High' : engagementScore >= 65 ? 'Good' : 'Build streak', icon: Zap, color: 'from-emerald-500 to-teal-500' },
+  ];
+
+  const aiInsights = [
+    {
+      title: 'Learning Pattern',
+      desc: `Average ${Number(chatStats?.averageMessagesPerSession || 0).toFixed(1)} messages per chat session.`,
+      icon: TrendingUp,
+    },
+    {
+      title: 'Area for Improvement',
+      desc: `Current quiz average is ${Number(quizStats?.averageScore || 0).toFixed(1)}%. Daily quiz attempts can improve retention.`,
+      icon: Target,
+    },
+    {
+      title: 'Top Topic Source',
+      desc: `${Number(notesStats?.totalNotes || 0)} notes saved across ${Number(notesStats?.totalCategories || 0)} categories.`,
+      icon: Search,
+    },
+  ];
 
   return (
     <div className="min-h-screen bg-[#0a0f2c] space-y-8">
@@ -139,6 +275,17 @@ export default function AnalyticsPage() {
           ))}
         </div>
       </div>
+
+      {error ? (
+        <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {error}
+        </div>
+      ) : null}
+      {isLoading ? (
+        <div className="rounded-2xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+          Loading live analytics...
+        </div>
+      ) : null}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -179,7 +326,7 @@ export default function AnalyticsPage() {
             </div>
             <div className="h-[350px] w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={timeRangeData[timeRange]}>
+                <AreaChart data={timeSeries}>
                   <defs>
                     <linearGradient id="colorInter" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/>

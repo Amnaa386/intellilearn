@@ -3,21 +3,26 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  MessageSquare,
   Sparkles,
   Loader2,
   ChevronLeft,
   ChevronRight,
   Send,
   Bot,
-  Hash,
-  Clock,
   ListChecks,
   PenLine,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { loadChatSessions } from '@/lib/chatSessions';
+import { Input } from '@/components/ui/input';
+import { useLocation } from 'react-router-dom';
+import {
+  generateQuizFromChat,
+  generateQuizFromTopic,
+  getUserQuizzes,
+  getQuizById,
+  submitQuizAttempt,
+} from '@/lib/quizApi';
 import {
   generateQuizQuestionsFromSession,
   scoreChatQuiz,
@@ -45,15 +50,56 @@ function buildHighlightParts(text, highlights) {
   return parts.length ? parts : [{ type: 't', text }];
 }
 
-function formatRelativeTime(ts) {
-  if (!ts) return '';
-  const diff = Date.now() - ts;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return 'Just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+function mapBackendQuizToLocalQuestions(backendQuiz) {
+  const rows = Array.isArray(backendQuiz?.questions) ? backendQuiz.questions : [];
+  return rows.map((q, idx) => {
+    if (q.type === 'written') {
+      return {
+        id: q.id || `q-${idx + 1}`,
+        type: 'written',
+        question: q.question,
+        minLength: q.minLength || WRITTEN_MIN_CHARS,
+        hintPool: Array.isArray(q.hintPool) ? q.hintPool : [],
+      };
+    }
+    if (q.type === 'true_false') {
+      return {
+        id: q.id || `q-${idx + 1}`,
+        type: 'mcq',
+        question: q.question,
+        options: ['True', 'False'],
+        correct: q.correct_bool ? 0 : 1,
+      };
+    }
+    return {
+      id: q.id || `q-${idx + 1}`,
+      type: 'mcq',
+      question: q.question,
+      options: Array.isArray(q.options) && q.options.length === 4 ? q.options : ['Option A', 'Option B', 'Option C', 'Option D'],
+      correct: typeof q.correct === 'number' ? q.correct : 0,
+    };
+  });
+}
+
+function formatQuizDate(value) {
+  if (!value) return 'Unknown date';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return 'Unknown date';
+  return dt.toLocaleString();
+}
+
+function getDateGroupLabel(dateKey) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((startOfToday.getTime() - dateKey) / 86400000);
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  return new Date(dateKey).toLocaleDateString(undefined, {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
 }
 
 /** Animated AI assistant for quiz generation (SVG + motion — no external assets) */
@@ -128,10 +174,8 @@ function AiAssistantLoader() {
 }
 
 export default function QuizFromChatFlow() {
+  const location = useLocation();
   const [stage, setStage] = useState('sessions');
-  const [sessions, setSessions] = useState(() => loadChatSessions());
-  const [selectedId, setSelectedId] = useState(null);
-  const [isLaunching, setIsLaunching] = useState(false);
   const [questions, setQuestions] = useState([]);
   const [activeSession, setActiveSession] = useState(null);
   const [answers, setAnswers] = useState({});
@@ -142,15 +186,106 @@ export default function QuizFromChatFlow() {
   const [answerMode, setAnswerMode] = useState(null);
   /** @type {Record<string, { evaluated?: boolean, quality?: number, bullets?: string[], highlights?: Array<{start:number,end:number,label?:string}>, hintsUsed?: number, hintLog?: string[], checkedAgainst?: string | null }>} */
   const [writtenByQ, setWrittenByQ] = useState({});
+  const [isApiGenerating, setIsApiGenerating] = useState(false);
+  const [generationError, setGenerationError] = useState('');
+  const [topicInput, setTopicInput] = useState('');
+  const [outlineInput, setOutlineInput] = useState('');
+  const [historyItems, setHistoryItems] = useState([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submittedResult, setSubmittedResult] = useState(null);
 
-  useEffect(() => {
-    setSessions(loadChatSessions());
+  const loadQuizHistory = useCallback(async () => {
+    try {
+      setHistoryError('');
+      setIsHistoryLoading(true);
+      const payload = await getUserQuizzes({ page: 1, limit: 12, completed: true });
+      const rows = Array.isArray(payload?.quizzes) ? payload.quizzes : [];
+      setHistoryItems(rows);
+    } catch (err) {
+      setHistoryError(err?.message || 'Failed to load previous quizzes.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
   }, []);
 
-  const selectedSession = useMemo(
-    () => sessions.find((s) => s.id === selectedId) || null,
-    [sessions, selectedId],
-  );
+  useEffect(() => {
+    loadQuizHistory();
+  }, [loadQuizHistory]);
+
+  const startQuizFromBackend = useCallback((backendQuiz, fallbackTitle = 'Generated quiz') => {
+    const localQuestions = mapBackendQuizToLocalQuestions(backendQuiz);
+    if (!localQuestions.length) {
+      setGenerationError('No questions returned. Please try again.');
+      return;
+    }
+    const detectedMode = localQuestions.some((q) => q.type === 'written') ? 'written' : 'mcq';
+    setActiveSession({
+      id: backendQuiz?.id || 'quiz-generated',
+      preview: backendQuiz?.title || fallbackTitle,
+      messageCount: localQuestions.length,
+      updatedAt: Date.now(),
+    });
+    setAnswerMode(detectedMode);
+    setQuestions(localQuestions);
+    setAnswers({});
+    setWrittenByQ({});
+    setFeedback(null);
+    setSubmittedResult(null);
+    setScore(0);
+    setCurrentIndex(0);
+    setStage('quiz');
+  }, []);
+
+  const handleGenerateFromTopic = useCallback(async () => {
+    const topic = topicInput.trim();
+    if (!topic) {
+      setGenerationError('Please enter a topic first.');
+      return;
+    }
+    try {
+      setGenerationError('');
+      setIsApiGenerating(true);
+      const backendQuiz = await generateQuizFromTopic({
+        topic,
+        outline: outlineInput,
+        questionCount: 6,
+        difficulty: 'medium',
+        types: ['mcq'],
+      });
+      startQuizFromBackend(backendQuiz, topic);
+    } catch (err) {
+      setGenerationError(err?.message || 'Failed to generate quiz from topic.');
+    } finally {
+      setIsApiGenerating(false);
+    }
+  }, [topicInput, outlineInput, startQuizFromBackend]);
+
+  useEffect(() => {
+    const sid = location?.state?.fromChatSessionId;
+    if (!sid) return;
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setGenerationError('');
+        setIsApiGenerating(true);
+        const backendQuiz = await generateQuizFromChat(sid, 'mcq');
+        if (cancelled) return;
+        startQuizFromBackend(backendQuiz, 'Quiz from current chat');
+      } catch (err) {
+        if (!cancelled) {
+          setGenerationError(err?.message || 'Failed to generate quiz from current chat.');
+        }
+      } finally {
+        if (!cancelled) setIsApiGenerating(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [location?.state?.fromChatSessionId, startQuizFromBackend]);
 
   /** After transition to generating stage, simulate AI quiz build then choose answer mode */
   useEffect(() => {
@@ -165,21 +300,6 @@ export default function QuizFromChatFlow() {
     }, 2600);
     return () => window.clearTimeout(t);
   }, [stage, activeSession]);
-
-  const handleGenerate = useCallback(
-    (e) => {
-      e?.preventDefault?.();
-      e?.stopPropagation?.();
-      if (!selectedSession || isLaunching) return;
-      setActiveSession(selectedSession);
-      setIsLaunching(true);
-      window.setTimeout(() => {
-        setIsLaunching(false);
-        setStage('generating');
-      }, 720);
-    },
-    [selectedSession, isLaunching],
-  );
 
   const handleAnswerMcq = (qid, optionIndex) => {
     setAnswers((prev) => ({ ...prev, [qid]: optionIndex }));
@@ -208,17 +328,30 @@ export default function QuizFromChatFlow() {
   };
 
   const startQuizWithMode = useCallback(
-    (mode) => {
+    async (mode) => {
       if (!activeSession) return;
-      const qs = generateQuizQuestionsFromSession(activeSession, mode);
-      setAnswerMode(mode);
-      setQuestions(qs);
-      setAnswers({});
-      setWrittenByQ({});
-      setCurrentIndex(0);
-      setStage('quiz');
+      try {
+        setGenerationError('');
+        setIsApiGenerating(true);
+        const backendQuiz = await generateQuizFromChat(activeSession.id, mode);
+        startQuizFromBackend(backendQuiz, activeSession.preview || 'Quiz from selected chat');
+      } catch (err) {
+        const fallbackQs = generateQuizQuestionsFromSession(activeSession, mode);
+        if (!fallbackQs.length) {
+          setGenerationError(err?.message || 'Unable to generate quiz from selected chat.');
+          return;
+        }
+        setAnswerMode(mode);
+        setQuestions(fallbackQs);
+        setAnswers({});
+        setWrittenByQ({});
+        setCurrentIndex(0);
+        setStage('quiz');
+      } finally {
+        setIsApiGenerating(false);
+      }
     },
-    [activeSession],
+    [activeSession, startQuizFromBackend],
   );
 
   const handleCheckWritten = (qid) => {
@@ -294,15 +427,52 @@ export default function QuizFromChatFlow() {
       ]),
     );
     const s = scoreChatQuiz(questions, answers, { writtenById });
-    setScore(s);
-    setFeedback(buildResultFeedback(s));
-    setStage('results');
+    const submitWrittenAnswers = Object.fromEntries(
+      Object.entries(writtenByQ).map(([id, row]) => [id, { quality: row?.quality ?? 0 }]),
+    );
+    const run = async () => {
+      setIsSubmitting(true);
+      try {
+        if (activeSession?.id) {
+          const result = await submitQuizAttempt({
+            quizId: activeSession.id,
+            answers,
+            writtenAnswers: submitWrittenAnswers,
+          });
+          const pct = typeof result?.percentage === 'number' ? Math.round(result.percentage) : s;
+          setSubmittedResult(result);
+          setScore(pct);
+          setFeedback(buildResultFeedback(pct));
+          await loadQuizHistory();
+        } else {
+          setScore(s);
+          setFeedback(buildResultFeedback(s));
+        }
+      } catch (err) {
+        // Keep local result visible even if submit fails.
+        setGenerationError(err?.message || 'Quiz submit failed, local result shown.');
+        setScore(s);
+        setFeedback(buildResultFeedback(s));
+      } finally {
+        setIsSubmitting(false);
+        setStage('results');
+      }
+    };
+    run();
+  };
+
+  const handleRetakeQuiz = () => {
+    setAnswers({});
+    setWrittenByQ({});
+    setCurrentIndex(0);
+    setScore(0);
+    setFeedback(null);
+    setSubmittedResult(null);
+    setStage('quiz');
   };
 
   const resetFlow = () => {
     setStage('sessions');
-    setSelectedId(null);
-    setIsLaunching(false);
     setQuestions([]);
     setActiveSession(null);
     setAnswers({});
@@ -310,7 +480,8 @@ export default function QuizFromChatFlow() {
     setFeedback(null);
     setAnswerMode(null);
     setWrittenByQ({});
-    setSessions(loadChatSessions());
+    setSubmittedResult(null);
+    loadQuizHistory();
   };
 
   const leaveChooseMode = () => {
@@ -323,9 +494,61 @@ export default function QuizFromChatFlow() {
     setCurrentIndex(0);
   };
 
+  const handleRetakePreviousQuiz = useCallback(
+    async (quizId) => {
+      if (!quizId) return;
+      try {
+        setGenerationError('');
+        setIsApiGenerating(true);
+        const backendQuiz = await getQuizById(quizId);
+        startQuizFromBackend(backendQuiz, 'Retake previous quiz');
+      } catch (err) {
+        setGenerationError(err?.message || 'Unable to open this previous quiz.');
+      } finally {
+        setIsApiGenerating(false);
+      }
+    },
+    [startQuizFromBackend],
+  );
+
   const currentQ = questions[currentIndex];
   const progress = questions.length ? ((currentIndex + 1) / questions.length) * 100 : 0;
   const currentStepComplete = currentQ ? isQuestionComplete(currentQ) : false;
+  const resultBreakdown = useMemo(() => {
+    if (!questions.length) return { correct: 0, wrong: 0, total: 0 };
+    let correct = 0;
+    questions.forEach((q) => {
+      if (q.type === 'mcq') {
+        if (answers[q.id] === q.correct) correct += 1;
+        return;
+      }
+      if (q.type === 'written') {
+        const quality = writtenByQ[q.id]?.quality;
+        if (typeof quality === 'number' && quality >= 0.6) correct += 1;
+      }
+    });
+    const total = questions.length;
+    return { correct, wrong: Math.max(0, total - correct), total };
+  }, [questions, answers, writtenByQ]);
+  const groupedHistory = useMemo(() => {
+    return historyItems.reduce((acc, item) => {
+      const rawDate = item?.completedAt || item?.createdAt;
+      const d = rawDate ? new Date(rawDate) : new Date();
+      const safeDate = Number.isNaN(d.getTime()) ? new Date() : d;
+      const dateKey = new Date(
+        safeDate.getFullYear(),
+        safeDate.getMonth(),
+        safeDate.getDate(),
+      ).getTime();
+      if (!acc[dateKey]) acc[dateKey] = [];
+      acc[dateKey].push(item);
+      return acc;
+    }, {});
+  }, [historyItems]);
+  const sortedHistoryKeys = useMemo(
+    () => Object.keys(groupedHistory).map(Number).sort((a, b) => b - a),
+    [groupedHistory],
+  );
 
   return (
     <div className="mx-auto max-w-4xl space-y-8">
@@ -343,7 +566,24 @@ export default function QuizFromChatFlow() {
           Pick a conversation you had with the AI tutor. We&apos;ll generate practice questions grounded in that thread—no
           fixed subject lists, just your own learning context.
         </p>
+        <p className="max-w-2xl text-sm leading-relaxed text-slate-500">
+          You can also generate a fresh quiz by writing a topic and optional outline below. Example: &quot;Operating Systems
+          scheduling&quot; + key bullet points you want covered.
+        </p>
       </motion.header>
+
+      {generationError ? (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {generationError}
+        </div>
+      ) : null}
+
+      {isApiGenerating && stage === 'sessions' ? (
+        <div className="flex items-center gap-2 rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Generating your quiz...
+        </div>
+      ) : null}
 
       <AnimatePresence mode="wait">
         {stage === 'sessions' && (
@@ -355,152 +595,120 @@ export default function QuizFromChatFlow() {
             transition={{ duration: 0.35 }}
             className="space-y-6"
           >
-            <div className="grid gap-4">
-              {sessions.map((session, i) => {
-                const isSelected = selectedId === session.id;
-                const expandActive = isLaunching && isSelected;
-                const dimOthers = isLaunching && !isSelected;
-                return (
-                  <motion.div
-                    key={session.id}
-                    layout
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{
-                      opacity: dimOthers ? 0.35 : 1,
-                      y: 0,
-                      scale: expandActive ? 1.01 : 1,
-                    }}
-                    transition={{ delay: i * 0.04, layout: { duration: 0.45, ease: [0.22, 1, 0.36, 1] } }}
-                    className={cn(dimOthers && 'pointer-events-none blur-[0.5px]')}
+            <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-5 sm:p-6">
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-purple-300/90">Create from topic</p>
+              <h2 className="mt-1 text-xl font-bold text-white">Generate a custom quiz</h2>
+              <p className="mt-2 text-sm text-slate-400">
+                Tell us your topic and, if you want, add a small outline/notes. We&apos;ll generate a focused quiz that matches your context.
+              </p>
+              <div className="mt-4 grid gap-3">
+                <Input
+                  value={topicInput}
+                  onChange={(e) => setTopicInput(e.target.value)}
+                  placeholder="e.g. Object Oriented Programming fundamentals"
+                  className="border-white/10 bg-slate-950/50 text-slate-100 placeholder:text-slate-500"
+                />
+                <Textarea
+                  value={outlineInput}
+                  onChange={(e) => setOutlineInput(e.target.value)}
+                  rows={4}
+                  placeholder="Optional outline: mention subtopics, key points, or what you want to practice."
+                  className="border-white/10 bg-slate-950/50 text-slate-100 placeholder:text-slate-500"
+                />
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    onClick={handleGenerateFromTopic}
+                    disabled={isApiGenerating}
+                    className="rounded-full bg-gradient-to-r from-purple-600 to-blue-600 text-white"
                   >
-                    <motion.button
-                      type="button"
-                      layout
-                      disabled={isLaunching}
-                      whileHover={!isLaunching ? { scale: 1.008 } : undefined}
-                      whileTap={!isLaunching ? { scale: 0.992 } : undefined}
-                      onClick={() => {
-                        if (isLaunching) return;
-                        setSelectedId(session.id);
-                      }}
-                      className={cn(
-                        'relative w-full rounded-2xl border p-5 text-left transition-colors duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0f2c]',
-                        isSelected
-                          ? 'border-blue-500/55 bg-blue-500/[0.12] shadow-lg shadow-blue-900/25'
-                          : 'border-white/10 bg-slate-900/40 hover:border-white/25',
-                        expandActive && 'ring-2 ring-blue-400/50 ring-offset-2 ring-offset-[#0a0f2c]',
-                      )}
-                    >
-                      {isSelected && (
-                        <motion.span
-                          layoutId="chat-active-badge"
-                          className="absolute right-4 top-4 rounded-full bg-blue-600/90 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white shadow-md"
-                          initial={{ opacity: 0, scale: 0.9 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                        >
-                          Selected
-                        </motion.span>
-                      )}
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:pr-24">
-                        <div className="flex items-start gap-3">
-                          <motion.div
-                            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600/30 to-purple-600/30 ring-1 ring-white/10"
-                            animate={isSelected ? { scale: [1, 1.06, 1] } : {}}
-                            transition={{ duration: 2, repeat: isSelected ? Infinity : 0, ease: 'easeInOut' }}
-                          >
-                            <MessageSquare className="h-5 w-5 text-blue-300" />
-                          </motion.div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                                <Hash className="mr-0.5 inline h-3 w-3" />
-                                {session.id}
-                              </span>
-                              <span className="text-[10px] text-slate-600">·</span>
-                              <span className="flex items-center gap-1 text-[11px] text-slate-500">
-                                <Clock className="h-3 w-3" />
-                                {formatRelativeTime(session.updatedAt)}
-                              </span>
-                            </div>
-                            <motion.div
-                              initial={false}
-                              animate={{ height: expandActive ? 'auto' : 'auto' }}
-                              className="overflow-hidden"
-                            >
-                              <p
-                                className={cn(
-                                  'mt-2 text-sm leading-relaxed text-slate-200 transition-all duration-500',
-                                  expandActive ? 'line-clamp-none' : 'line-clamp-3',
-                                )}
-                              >
-                                {session.preview}
-                              </p>
-                            </motion.div>
-                            <AnimatePresence>
-                              {expandActive && (
-                                <motion.div
-                                  initial={{ opacity: 0, height: 0 }}
-                                  animate={{ opacity: 1, height: 'auto' }}
-                                  exit={{ opacity: 0, height: 0 }}
-                                  className="mt-4 overflow-hidden rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2.5"
-                                >
-                                  <p className="flex items-center gap-2 text-xs font-medium text-emerald-300">
-                                    <span className="relative flex h-2 w-2">
-                                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                                      <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-                                    </span>
-                                    Active session — opening thread and preparing your quiz…
-                                  </p>
-                                </motion.div>
-                              )}
-                            </AnimatePresence>
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-right text-[11px] text-slate-500">
-                          {session.messageCount != null ? (
-                            <span className="rounded-lg bg-white/5 px-2 py-1">{session.messageCount} messages</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    </motion.button>
-                  </motion.div>
-                );
-              })}
+                    {isApiGenerating ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Generating...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="mr-2 h-4 w-4" />
+                        Generate quiz from topic
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
             </div>
 
-            <motion.div
-              className="flex flex-col items-stretch justify-end gap-4 sm:flex-row sm:items-center"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.15 }}
-            >
-              <p className="flex-1 text-xs text-slate-500">
-                Tip: longer chats give richer context for question wording. Visit the AI Tutor to add more threads.
-              </p>
-              <motion.button
-                type="button"
-                disabled={!selectedSession || isLaunching}
-                onClick={handleGenerate}
-                whileHover={selectedSession && !isLaunching ? { scale: 1.03, y: -1 } : undefined}
-                whileTap={selectedSession && !isLaunching ? { scale: 0.97 } : undefined}
-                className={cn(
-                  'relative inline-flex min-h-[52px] w-full cursor-pointer select-none items-center justify-center gap-2 overflow-hidden rounded-full bg-gradient-to-r from-blue-600 to-purple-600 px-8 py-3.5 text-base font-semibold text-white shadow-lg shadow-blue-900/35 transition-shadow',
-                  'hover:shadow-xl hover:shadow-blue-800/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/80 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0f2c]',
-                  'disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45',
-                  'sm:min-w-[280px] sm:w-auto',
-                )}
-              >
-                <span className="pointer-events-none absolute inset-0 bg-gradient-to-r from-white/0 via-white/10 to-white/0 opacity-0 transition-opacity hover:opacity-100" />
-                {isLaunching ? (
-                  <Loader2 className="relative z-10 h-5 w-5 shrink-0 animate-spin" aria-hidden />
-                ) : (
-                  <Sparkles className="relative z-10 h-5 w-5 shrink-0" aria-hidden />
-                )}
-                <span className="relative z-10">
-                  {isLaunching ? 'Preparing…' : 'Generate quiz from this chat'}
-                </span>
-              </motion.button>
-            </motion.div>
+            <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-5 sm:p-6">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300/90">History</p>
+                  <h2 className="mt-1 text-xl font-bold text-white">Previous quizzes</h2>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={loadQuizHistory}
+                  disabled={isHistoryLoading}
+                  className="rounded-xl border-white/15 text-slate-300 hover:bg-white/5"
+                >
+                  {isHistoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Refresh'}
+                </Button>
+              </div>
+              {historyError ? (
+                <p className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                  {historyError}
+                </p>
+              ) : null}
+              {!isHistoryLoading && !historyItems.length ? (
+                <p className="mt-3 text-sm text-slate-400">No completed quizzes yet. Submit one attempt and it will appear here.</p>
+              ) : null}
+              <div className="mt-4 space-y-5">
+                {sortedHistoryKeys.map((dateKey) => (
+                  <div key={dateKey} className="space-y-3">
+                    <div className="flex items-center justify-between rounded-xl border border-white/10 bg-slate-950/40 px-4 py-2">
+                      <p className="text-sm font-semibold text-slate-200">{getDateGroupLabel(dateKey)}</p>
+                      <p className="text-xs text-slate-500">
+                        {groupedHistory[dateKey].length} quiz{groupedHistory[dateKey].length > 1 ? 'zes' : ''}
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {groupedHistory[dateKey].map((item) => {
+                        const maxScore = Number(item?.maxScore || 0);
+                        const rawScore = Number(item?.score || 0);
+                        const pct = maxScore > 0 ? Math.round((rawScore / maxScore) * 100) : 0;
+                        const quizDate = item?.completedAt || item?.createdAt;
+                        return (
+                          <div
+                            key={item.id}
+                            className="group rounded-2xl border border-slate-700/60 bg-gradient-to-br from-[#0f173d] to-[#0b1231] p-5 shadow-xl transition hover:border-blue-400/40 hover:from-[#15204d] hover:to-[#101a42]"
+                          >
+                            <p className="text-[11px] text-slate-400">{formatQuizDate(quizDate)}</p>
+                            <h3 className="mt-2 line-clamp-2 text-base font-semibold text-white group-hover:text-blue-100">
+                              {item.title || 'Quiz'}
+                            </h3>
+                            <p className="mt-2 text-sm text-slate-300">
+                              Score: <span className="font-semibold text-blue-200">{rawScore}/{maxScore || '-'}</span> ({pct}%)
+                            </p>
+                            <div className="mt-4 flex items-center justify-between">
+                              <span className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-[10px] font-semibold text-blue-200">
+                                AI-Generated
+                              </span>
+                              <Button
+                                type="button"
+                                onClick={() => handleRetakePreviousQuiz(item.id)}
+                                className="rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-white"
+                              >
+                                Retake
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </motion.section>
         )}
 
@@ -578,10 +786,11 @@ export default function QuizFromChatFlow() {
             <div className="grid gap-4 sm:grid-cols-2">
               <motion.button
                 type="button"
+                disabled={isApiGenerating}
                 whileHover={{ y: -2 }}
                 whileTap={{ scale: 0.99 }}
                 onClick={() => startQuizWithMode('mcq')}
-                className="group flex flex-col gap-3 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/90 p-6 text-left shadow-lg transition-colors hover:border-blue-500/40"
+                className="group flex flex-col gap-3 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/90 p-6 text-left shadow-lg transition-colors hover:border-blue-500/40 disabled:opacity-50"
               >
                 <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-500/15 ring-1 ring-blue-500/25">
                   <ListChecks className="h-6 w-6 text-blue-300" aria-hidden />
@@ -597,10 +806,11 @@ export default function QuizFromChatFlow() {
 
               <motion.button
                 type="button"
+                disabled={isApiGenerating}
                 whileHover={{ y: -2 }}
                 whileTap={{ scale: 0.99 }}
                 onClick={() => startQuizWithMode('written')}
-                className="group flex flex-col gap-3 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/90 p-6 text-left shadow-lg transition-colors hover:border-purple-500/40"
+                className="group flex flex-col gap-3 rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900/90 to-slate-950/90 p-6 text-left shadow-lg transition-colors hover:border-purple-500/40 disabled:opacity-50"
               >
                 <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500/15 ring-1 ring-purple-500/25">
                   <PenLine className="h-6 w-6 text-purple-300" aria-hidden />
@@ -875,15 +1085,15 @@ export default function QuizFromChatFlow() {
               ) : (
                 <Button
                   type="button"
-                  disabled={!currentStepComplete}
+                  disabled={!currentStepComplete || isSubmitting}
                   onClick={() => {
-                    if (!currentStepComplete) return;
+                    if (!currentStepComplete || isSubmitting) return;
                     handleSubmitQuiz();
                   }}
                   className="rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  <Send className="mr-2 h-4 w-4" />
-                  Submit quiz
+                  {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                  {isSubmitting ? 'Submitting...' : 'Submit quiz'}
                 </Button>
               )}
             </div>
@@ -911,6 +1121,31 @@ export default function QuizFromChatFlow() {
               <p className="mx-auto mt-2 max-w-lg text-sm text-slate-400">{feedback.summary}</p>
             </div>
             <div className="space-y-4 border-t border-white/5 p-6 sm:p-8">
+              {isSubmitting ? (
+                <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+                  <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+                  Saving quiz result...
+                </div>
+              ) : null}
+              {submittedResult ? (
+                <div className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+                  Result saved. Previous score stays the same until you submit a new attempt.
+                </div>
+              ) : null}
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-300/90">Correct</p>
+                  <p className="mt-1 text-2xl font-bold text-emerald-200">{resultBreakdown.correct}</p>
+                </div>
+                <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-rose-300/90">Wrong</p>
+                  <p className="mt-1 text-2xl font-bold text-rose-200">{resultBreakdown.wrong}</p>
+                </div>
+                <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-300/90">Total</p>
+                  <p className="mt-1 text-2xl font-bold text-blue-100">{resultBreakdown.total}</p>
+                </div>
+              </div>
               <h3 className="text-sm font-semibold text-slate-300">Suggestions</h3>
               <ul className="space-y-3">
                 {feedback.suggestions.map((line) => (
@@ -923,14 +1158,23 @@ export default function QuizFromChatFlow() {
                   </li>
                 ))}
               </ul>
-              <Button
-                type="button"
-                onClick={resetFlow}
-                variant="outline"
-                className="mt-4 w-full rounded-xl border-white/15 py-6 text-base hover:bg-white/5"
-              >
-                Back to chat sessions
-              </Button>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <Button
+                  type="button"
+                  onClick={handleRetakeQuiz}
+                  className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 py-6 text-base text-white hover:from-blue-500 hover:to-purple-500"
+                >
+                  Retake this quiz
+                </Button>
+                <Button
+                  type="button"
+                  onClick={resetFlow}
+                  variant="outline"
+                  className="w-full rounded-xl border-white/15 py-6 text-base hover:bg-white/5"
+                >
+                  Back to chat sessions
+                </Button>
+              </div>
             </div>
           </motion.section>
         )}

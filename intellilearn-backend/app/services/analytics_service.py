@@ -96,6 +96,27 @@ class AnalyticsService:
             "totalPages": (len(logs) + limit - 1) // limit
         }
 
+    async def get_user_activity_logs(
+        self,
+        user_id: str,
+        page: int = 1,
+        limit: int = 100,
+        action: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        logs = [l for l in self._get_collection("activity_logs") if l.get("userId") == user_id]
+        if action:
+            logs = [l for l in logs if l.get("action") == action]
+        logs.sort(key=lambda x: x.get("timestamp") or datetime.min, reverse=True)
+        skip = (page - 1) * limit
+        page_logs = logs[skip:skip + limit]
+        return {
+            "logs": page_logs,
+            "total": len(logs),
+            "page": page,
+            "limit": limit,
+            "totalPages": (len(logs) + limit - 1) // limit,
+        }
+
     async def get_system_insights(self) -> Dict[str, Any]:
         return {
             "mostRequestedTopic": "General study topics",
@@ -121,11 +142,12 @@ class AnalyticsService:
         quizzes = [q for q in self._get_collection("quizzes") if q.get("userId") == user_id and q.get("completedAt")]
         notes = [n for n in self._get_collection("notes") if n.get("userId") == user_id]
         scores = [(q.get("score", 0) / q.get("maxScore", 1)) for q in quizzes if q.get("maxScore")]
+        study_streak = await self._calculate_study_streak(user_id)
         return UserStats(
             topicsCompleted=len(notes),
             quizzesAttempted=len(quizzes),
             performance=round((sum(scores) / len(scores) * 100), 1) if scores else 0,
-            studyStreak=0,
+            studyStreak=study_streak,
             globalRank=1240,
             totalStudyTime=0
         )
@@ -134,6 +156,29 @@ class AnalyticsService:
         acts = [a for a in self._get_collection("activity_logs") if a.get("userId") == user_id]
         acts.sort(key=lambda x: x.get("timestamp") or datetime.min, reverse=True)
         return acts[:limit]
+
+    async def _calculate_study_streak(self, user_id: str) -> int:
+        """Count consecutive active days ending at today."""
+        acts = [a for a in self._get_collection("activity_logs") if a.get("userId") == user_id]
+        if not acts:
+            return 0
+
+        active_days = set()
+        for row in acts:
+            ts = row.get("timestamp")
+            if isinstance(ts, datetime):
+                active_days.add(ts.date())
+
+        if not active_days:
+            return 0
+
+        today = datetime.utcnow().date()
+        streak = 0
+        cursor = today
+        while cursor in active_days:
+            streak += 1
+            cursor = cursor - timedelta(days=1)
+        return streak
 
 # Singleton instance
 analytics_service = AnalyticsService()

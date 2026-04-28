@@ -32,6 +32,39 @@ import {
   Loader2
 } from 'lucide-react';
 import { FaRobot } from 'react-icons/fa';
+import {
+  getUserAnalyticsOverview,
+  getUserActivityLogs,
+  getChatStats,
+  getQuizStats,
+  getNotesStats,
+} from '@/lib/analyticsApi';
+
+function toDateSafe(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatRelativeTime(value) {
+  const d = toDateSafe(value);
+  if (!d) return 'Unknown time';
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins} mins ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hours ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days} days ago`;
+}
+
+function mapActionToActivity(action = '') {
+  if (action.startsWith('quiz_')) return { icon: CheckCircle2, color: 'text-emerald-400' };
+  if (action.startsWith('notes_')) return { icon: FileText, color: 'text-blue-400' };
+  if (action === 'ppt_explanation') return { icon: Presentation, color: 'text-orange-400' };
+  return { icon: Play, color: 'text-purple-400' };
+}
 
 export default function StudentDashboard() {
   const navigate = useNavigate();
@@ -61,6 +94,11 @@ export default function StudentDashboard() {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [overview, setOverview] = useState(null);
+  const [liveChatStats, setLiveChatStats] = useState(null);
+  const [liveQuizStats, setLiveQuizStats] = useState(null);
+  const [liveNotesStats, setLiveNotesStats] = useState(null);
+  const [liveActivities, setLiveActivities] = useState([]);
 
   const slides = [
     { title: 'Introduction to AI', content: 'Artificial Intelligence is the simulation of human intelligence by machines.', explanation: 'Think of AI as a brain for computers. It helps them learn from data and make decisions just like we do!' },
@@ -84,6 +122,34 @@ export default function StudentDashboard() {
     return () => clearInterval(interval);
   }, [isAutoPlaying, showPresentation, slides.length]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadDashboardData = async () => {
+      try {
+        const [overviewRes, activityRes, chatRes, quizRes, notesRes] = await Promise.all([
+          getUserAnalyticsOverview(),
+          getUserActivityLogs({ page: 1, limit: 10 }),
+          getChatStats(),
+          getQuizStats(),
+          getNotesStats(),
+        ]);
+        if (cancelled) return;
+        setOverview(overviewRes || {});
+        setLiveChatStats(chatRes || {});
+        setLiveQuizStats(quizRes || {});
+        setLiveNotesStats(notesRes || {});
+        setLiveActivities(Array.isArray(activityRes?.logs) ? activityRes.logs.slice(0, 3) : []);
+      } catch (err) {
+        // Keep dashboard usable even if live fetch fails.
+        console.error('Failed to load dashboard live stats:', err);
+      }
+    };
+    loadDashboardData();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleDownloadSlides = () => {
     setIsDownloading(true);
     // Simulate a download delay
@@ -94,10 +160,10 @@ export default function StudentDashboard() {
   };
 
   const stats = [
-    { label: 'Topics Completed', value: '48', icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-    { label: 'Quizzes Attempted', value: '24', icon: BrainCircuit, color: 'text-blue-400', bg: 'bg-blue-500/10' },
-    { label: 'Performance', value: '92%', icon: TrendingUp, color: 'text-orange-400', bg: 'bg-orange-500/10' },
-    { label: 'Study Streak', value: '7 Days', icon: Zap, color: 'text-purple-400', bg: 'bg-purple-500/10' },
+    { label: 'Topics Completed', value: String(liveNotesStats?.totalNotes ?? overview?.stats?.topicsCompleted ?? 0), icon: CheckCircle2, color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
+    { label: 'Quizzes Attempted', value: String(liveQuizStats?.totalQuizzes ?? overview?.stats?.quizzesAttempted ?? 0), icon: BrainCircuit, color: 'text-blue-400', bg: 'bg-blue-500/10' },
+    { label: 'Performance', value: `${Math.round(Number(liveQuizStats?.averageScore ?? overview?.stats?.performance ?? 0))}%`, icon: TrendingUp, color: 'text-orange-400', bg: 'bg-orange-500/10' },
+    { label: 'Study Streak', value: `${Number(overview?.stats?.studyStreak ?? 0)} Days`, icon: Zap, color: 'text-purple-400', bg: 'bg-purple-500/10' },
   ];
 
   const quickActions = [
@@ -198,7 +264,7 @@ export default function StudentDashboard() {
              </div>
              <div>
                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest leading-none">Global Rank</p>
-               <p className="text-white font-bold text-sm">#1,240</p>
+               <p className="text-white font-bold text-sm">#{Number(overview?.stats?.globalRank ?? 1240).toLocaleString()}</p>
              </div>
           </div>
         </div>
@@ -386,21 +452,28 @@ export default function StudentDashboard() {
               <History className="w-5 h-5 text-slate-600" />
             </div>
             <div className="space-y-4">
-              {[
-                { text: 'Completed "Neural Networks" Quiz', time: '1 hour ago', icon: CheckCircle2, color: 'text-emerald-400' },
-                { text: 'Generated Notes for "History 101"', time: '3 hours ago', icon: FileText, color: 'text-blue-400' },
-                { text: 'Started "Python Advanced" Course', time: 'Yesterday', icon: Play, color: 'text-purple-400' },
-              ].map((activity, i) => (
+              {(liveActivities.length ? liveActivities : [
+                { id: 'fallback-1', action: 'quiz_completed', timestamp: null, details: { topic: 'Neural Networks' } },
+                { id: 'fallback-2', action: 'notes_generated', timestamp: null, details: { topic: 'History 101' } },
+                { id: 'fallback-3', action: 'chat_message', timestamp: null, details: { topic: 'Python Advanced' } },
+              ]).map((activity, i) => {
+                const mapped = mapActionToActivity(activity?.action || '');
+                const details = activity?.details && typeof activity.details === 'object' ? activity.details : {};
+                const title = details.topic || details.title || details.source || details.quizId || details.noteId || '';
+                return (
                 <div key={i} className="flex gap-4 p-3 rounded-2xl hover:bg-white/5 transition-colors cursor-pointer group">
-                  <div className={`w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center ${activity.color}`}>
-                    <activity.icon className="w-5 h-5" />
+                  <div className={`w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center ${mapped.color}`}>
+                    <mapped.icon className="w-5 h-5" />
                   </div>
                   <div>
-                    <p className="text-slate-200 font-bold text-xs leading-tight group-hover:text-white transition-colors">{activity.text}</p>
-                    <p className="text-[10px] text-slate-500 font-bold mt-1">{activity.time}</p>
+                    <p className="text-slate-200 font-bold text-xs leading-tight group-hover:text-white transition-colors">
+                      {(activity?.action || 'activity').replaceAll('_', ' ')}{title ? `: ${title}` : ''}
+                    </p>
+                    <p className="text-[10px] text-slate-500 font-bold mt-1">{formatRelativeTime(activity?.timestamp)}</p>
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
             <button 
               onClick={() => navigate('/dashboard/student/activities')}

@@ -307,6 +307,19 @@ ${convo}`;
     }
   };
 
+  const handleGenerateQuizFromChat = () => {
+    const activeSessionId = sessionIdRef?.current || null;
+    if (!activeSessionId) {
+      setApiError('Start or continue a chat first, then generate a quiz.');
+      return;
+    }
+    navigate('/dashboard/student/quiz', {
+      state: {
+        fromChatSessionId: activeSessionId,
+      },
+    });
+  };
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if ((!input.trim() && attachedFiles.length === 0) || isLoading) return;
@@ -544,6 +557,16 @@ ${convo}`;
             >
               <FileText className="w-4 h-4 mr-2" />
               {isGeneratingNotes ? 'Generating Notes...' : 'Generate Notes'}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={messages.length < 2 || !sessionIdRef?.current}
+              onClick={handleGenerateQuizFromChat}
+              className={isDarkMode ? 'border-slate-600 text-slate-300 hover:bg-slate-800/50' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}
+            >
+              <HelpCircle className="w-4 h-4 mr-2" />
+              Generate Quiz
             </Button>
           </div>
 

@@ -19,6 +19,8 @@ import {
 import { cn } from '@/lib/utils';
 import { getGoogleAuth } from '@/lib/firebase';
 
+const AUTH_API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+
 const formVariants = {
   enter: (direction) => ({
     x: direction > 0 ? 28 : -28,
@@ -149,32 +151,36 @@ export default function UnifiedAuthPage() {
     return Object.keys(e).length === 0;
   };
 
-  const handleLogin = (ev) => {
+  const handleLogin = async (ev) => {
     ev.preventDefault();
     setAuthError('');
     if (!runLoginValidation()) return;
     setLoadingLogin(true);
-    setTimeout(() => {
-      setLoadingLogin(false);
-      localStorage.setItem('intellilearn_isLoggedIn', 'true');
-      localStorage.setItem('intellilearn_role', 'student');
-      localStorage.setItem(
-        'intellilearn_user',
-        JSON.stringify({
-          name: loginEmail
-            .split('@')[0]
-            .split('.')
-            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-            .join(' '),
-          email: loginEmail,
-          role: 'student',
+    try {
+      const response = await fetch(`${AUTH_API_BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: loginEmail.trim(),
+          password: loginPassword,
         }),
-      );
-      navigate('/dashboard/student', { replace: true });
-    }, 250);
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.detail || 'Login failed');
+      }
+
+      persistSessionFromBackend(payload);
+      const userRole = payload?.user?.role || 'student';
+      navigate(userRole === 'admin' ? '/dashboard/admin' : '/dashboard/student', { replace: true });
+    } catch (err) {
+      setAuthError(err?.message || 'Unable to sign in. Please try again.');
+    } finally {
+      setLoadingLogin(false);
+    }
   };
 
-  const handleSignup = (ev) => {
+  const handleSignup = async (ev) => {
     ev.preventDefault();
     setAuthError('');
     setSignupError('');
@@ -200,20 +206,30 @@ export default function UnifiedAuthPage() {
       return;
     }
     setLoadingSignup(true);
-    setTimeout(() => {
-      setLoadingSignup(false);
-      localStorage.setItem('intellilearn_isLoggedIn', 'true');
-      localStorage.setItem('intellilearn_role', 'student');
-      localStorage.setItem(
-        'intellilearn_user',
-        JSON.stringify({
+    try {
+      const response = await fetch(`${AUTH_API_BASE}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           name: signup.name.trim(),
           email: signup.email.trim(),
+          password: signup.password,
           role: 'student',
+          status: 'active',
         }),
-      );
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.detail || 'Registration failed');
+      }
+
+      persistSessionFromBackend(payload);
       navigate('/dashboard/student', { replace: true });
-    }, 300);
+    } catch (err) {
+      setSignupError(err?.message || 'Unable to create account right now.');
+    } finally {
+      setLoadingSignup(false);
+    }
   };
 
   const sanitizeAvatar = (avatar) => {
@@ -255,8 +271,7 @@ export default function UnifiedAuthPage() {
 
   const completeGoogleAuth = async (cred) => {
     const idToken = await cred.user.getIdToken();
-    const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
-    const response = await fetch(`${apiBase}/api/auth/google-login`, {
+    const response = await fetch(`${AUTH_API_BASE}/api/auth/google-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id_token: idToken }),
@@ -663,7 +678,7 @@ export default function UnifiedAuthPage() {
                   <motion.div whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }}>
                     <Button
                       type="submit"
-                      disabled={loadingSignup || !passwordRulesOk || !signup.agreeTerms}
+                      disabled={loadingSignup}
                       className="group h-12 w-full rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 text-base font-semibold shadow-lg shadow-blue-900/30 transition-all hover:from-blue-500 hover:to-purple-500 disabled:pointer-events-none disabled:opacity-50"
                     >
                       {loadingSignup ? (
