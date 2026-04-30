@@ -1,29 +1,31 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import ErrorBoundary from './components/ErrorBoundary';
-import LandingPage from './pages/LandingPage';
-import HelpCenter from './pages/HelpCenter';
-import HelpArticlePage from './pages/HelpArticlePage';
-import SettingsCenter from './pages/SettingsCenter';
-import DetailedSettingsPage from './pages/DetailedSettingsPage';
-import LearningModePage from './pages/LearningModePage';
-import LearningModeContinuePage from './pages/LearningModeContinuePage';
 import ProtectedRoute from './components/ProtectedRoute';
-import UnifiedAuthPage from './pages/auth/UnifiedAuthPage';
-import ForgotPasswordPage from './pages/auth/forgot-password/page';
-import AuthLayout from './pages/auth/layout';
-import StudentDashboardLayout from './pages/dashboard/student/layout';
-import QuizPage from './pages/dashboard/student/quiz/page';
-import TutorPage from './pages/dashboard/student/tutor/page';
-import NotesPage from './pages/dashboard/student/Notes';
-import VoiceLessonPage from './pages/dashboard/student/VoiceLesson';
-import ExploreTopicsPage from './pages/dashboard/student/ExploreTopics';
-import AnalyticsPage from './pages/dashboard/student/Analytics';
-import SettingsPage from './pages/dashboard/student/Settings';
-import ActivitiesPage from './pages/dashboard/student/Activities';
-import StudentDashboard from './pages/dashboard/student/page';
-import AdminDashboardLayout from './pages/dashboard/admin/layout';
-import AdminDashboard from './pages/dashboard/admin/AdminDashboardV2';
+
+const LandingPage = lazy(() => import('./pages/LandingPage'));
+const HelpCenter = lazy(() => import('./pages/HelpCenter'));
+const HelpArticlePage = lazy(() => import('./pages/HelpArticlePage'));
+const SettingsCenter = lazy(() => import('./pages/SettingsCenter'));
+const DetailedSettingsPage = lazy(() => import('./pages/DetailedSettingsPage'));
+const LearningModePage = lazy(() => import('./pages/LearningModePage'));
+const LearningModeContinuePage = lazy(() => import('./pages/LearningModeContinuePage'));
+const UnifiedAuthPage = lazy(() => import('./pages/auth/UnifiedAuthPage'));
+const ForgotPasswordPage = lazy(() => import('./pages/auth/forgot-password/page'));
+const AuthLayout = lazy(() => import('./pages/auth/layout'));
+const StudentDashboardLayout = lazy(() => import('./pages/dashboard/student/layout'));
+const QuizPage = lazy(() => import('./pages/dashboard/student/quiz/page'));
+const TutorPage = lazy(() => import('./pages/dashboard/student/tutor/page'));
+const NotesPage = lazy(() => import('./pages/dashboard/student/Notes'));
+const PresentationsPage = lazy(() => import('./pages/dashboard/student/Presentations'));
+const VoiceLessonPage = lazy(() => import('./pages/dashboard/student/VoiceLesson'));
+const ExploreTopicsPage = lazy(() => import('./pages/dashboard/student/ExploreTopics'));
+const AnalyticsPage = lazy(() => import('./pages/dashboard/student/Analytics'));
+const SettingsPage = lazy(() => import('./pages/dashboard/student/Settings'));
+const ActivitiesPage = lazy(() => import('./pages/dashboard/student/Activities'));
+const StudentDashboard = lazy(() => import('./pages/dashboard/student/page'));
+const AdminDashboardLayout = lazy(() => import('./pages/dashboard/admin/layout'));
+const AdminDashboard = lazy(() => import('./pages/dashboard/admin/AdminDashboardV2'));
 
 const SETTINGS_STORAGE_KEY = 'intellilearn_detailed_settings';
 
@@ -58,7 +60,14 @@ function App() {
   return (
     <ErrorBoundary>
       <Router>
-        <Routes>
+        <Suspense
+          fallback={
+            <div className="flex min-h-screen items-center justify-center bg-[#0a0f2c]">
+              <div className="h-12 w-12 animate-spin rounded-full border-2 border-blue-500/30 border-t-blue-400" />
+            </div>
+          }
+        >
+          <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/learning-modes/:modeId" element={<LearningModePage />} />
           <Route path="/learning-modes/:modeId/continue" element={<LearningModeContinuePage />} />
@@ -127,6 +136,7 @@ function App() {
             <Route path="quiz" element={<QuizPage />} />
             <Route path="tutor" element={<TutorPage />} />
             <Route path="notes" element={<NotesPage />} />
+            <Route path="presentations" element={<PresentationsPage />} />
             <Route path="voice-lesson" element={<VoiceLessonPage />} />
             <Route path="modules" element={<ExploreTopicsPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
@@ -136,7 +146,8 @@ function App() {
           </Route>
           <Route path="/dashboard/teacher/*" element={<Navigate to="/dashboard/student" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+          </Routes>
+        </Suspense>
       </Router>
     </ErrorBoundary>
   );

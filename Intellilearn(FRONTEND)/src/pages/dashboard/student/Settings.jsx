@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { 
   User, 
   Mail, 
@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input';
 import { containerVariants, itemVariants, pageTransition } from '@/lib/animations';
 
 export default function SettingsPage() {
+  const prefersReducedMotion = useReducedMotion();
   const [isDarkMode, setIsDarkMode] = useState(true);
   const getInitials = (name = '') => {
     const parts = name
@@ -31,12 +32,26 @@ export default function SettingsPage() {
     return parts.map((p) => p[0]?.toUpperCase() || '').join('');
   };
 
-  const [profile, setProfile] = useState({
-    name: '',
-    email: '',
-    major: '',
-    university: '',
-    bio: ''
+  const [profile, setProfile] = useState(() => {
+    try {
+      const raw = localStorage.getItem('intellilearn_user');
+      const parsedUser = raw ? JSON.parse(raw) : null;
+      return {
+        name: parsedUser?.name || '',
+        email: parsedUser?.email || '',
+        major: parsedUser?.profile?.major || '',
+        university: parsedUser?.profile?.university || '',
+        bio: parsedUser?.profile?.bio || '',
+      };
+    } catch {
+      return {
+        name: '',
+        email: '',
+        major: '',
+        university: '',
+        bio: '',
+      };
+    }
   });
 
   useEffect(() => {
@@ -208,21 +223,19 @@ export default function SettingsPage() {
         <div className="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
           <div className="absolute top-0 left-0 w-full h-full bg-slate-950"></div>
           <motion.div
-            animate={{
-              scale: [1, 1.2, 1],
-              opacity: [0.1, 0.2, 0.1],
-              rotate: [0, 90, 0]
+            animate={prefersReducedMotion ? undefined : {
+              scale: [1, 1.12, 1],
+              opacity: [0.08, 0.15, 0.08],
             }}
-            transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+            transition={prefersReducedMotion ? undefined : { duration: 24, repeat: Infinity, ease: "linear" }}
             className="absolute -top-1/2 -left-1/2 w-full h-full bg-gradient-to-br from-blue-600/30 to-transparent blur-[120px] rounded-full"
           />
           <motion.div
-            animate={{
-              scale: [1.2, 1, 1.2],
-              opacity: [0.1, 0.15, 0.1],
-              rotate: [0, -90, 0]
+            animate={prefersReducedMotion ? undefined : {
+              scale: [1.08, 1, 1.08],
+              opacity: [0.08, 0.12, 0.08],
             }}
-            transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
+            transition={prefersReducedMotion ? undefined : { duration: 26, repeat: Infinity, ease: "linear" }}
             className="absolute -bottom-1/2 -right-1/2 w-full h-full bg-gradient-to-tl from-purple-600/30 to-transparent blur-[120px] rounded-full"
           />
         </div>
@@ -237,8 +250,8 @@ export default function SettingsPage() {
       >
         <div className="flex items-center gap-3">
           <motion.div
-            animate={{ rotate: [0, 360] }}
-            transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+            animate={prefersReducedMotion ? undefined : { rotate: [0, 360] }}
+            transition={prefersReducedMotion ? undefined : { duration: 8, repeat: Infinity, ease: "linear" }}
             className="p-2 bg-gradient-to-br from-blue-500 to-purple-500 rounded-2xl"
           >
             <Settings className="w-6 h-6 text-white" />
@@ -262,10 +275,10 @@ export default function SettingsPage() {
               onClick={handleImageClick}
             >
               <motion.div 
-                animate={{ 
+                animate={prefersReducedMotion ? undefined : { 
                   boxShadow: ["0 0 20px rgba(59, 130, 246, 0.5)", "0 0 40px rgba(139, 92, 246, 0.5)", "0 0 20px rgba(59, 130, 246, 0.5)"]
                 }}
-                transition={{ duration: 3, repeat: Infinity }}
+                transition={prefersReducedMotion ? undefined : { duration: 5, repeat: Infinity }}
                 className="w-32 h-32 rounded-full border-4 border-blue-500/20 overflow-hidden mb-4 bg-slate-800 flex items-center justify-center"
               >
                 {profileImage ? (
@@ -285,8 +298,8 @@ export default function SettingsPage() {
                 className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-full transition-opacity"
               >
                 <motion.div
-                  animate={{ scale: [1, 1.2, 1] }}
-                  transition={{ duration: 1, repeat: Infinity }}
+                  animate={prefersReducedMotion ? undefined : { scale: [1, 1.08, 1] }}
+                  transition={prefersReducedMotion ? undefined : { duration: 1.5, repeat: Infinity }}
                 >
                   <Camera className="w-8 h-8 text-white" />
                 </motion.div>
@@ -307,8 +320,8 @@ export default function SettingsPage() {
               <h3 className={`text-xl font-bold flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
                 {profile.name}
                 <motion.div
-                  animate={{ scale: [1, 1.2, 1] }}
-                  transition={{ duration: 2, repeat: Infinity }}
+                  animate={prefersReducedMotion ? undefined : { scale: [1, 1.08, 1] }}
+                  transition={prefersReducedMotion ? undefined : { duration: 2.5, repeat: Infinity }}
                 >
                   <Sparkles className="w-4 h-4 text-blue-400" />
                 </motion.div>
@@ -375,7 +388,6 @@ export default function SettingsPage() {
                 <label className={`text-sm font-medium ${theme.muted}`}>Full Name</label>
                 <motion.div 
                   whileHover={{ scale: 1.02 }}
-                  whileFocus={{ scale: 1.02 }}
                   className="relative"
                 >
                   <User className="absolute left-3 top-3 w-4 h-4 text-slate-500" />
@@ -396,7 +408,6 @@ export default function SettingsPage() {
                 <label className={`text-sm font-medium ${theme.muted}`}>Email Address</label>
                 <motion.div 
                   whileHover={{ scale: 1.02 }}
-                  whileFocus={{ scale: 1.02 }}
                   className="relative"
                 >
                   <Mail className="absolute left-3 top-3 w-4 h-4 text-slate-500" />
@@ -423,7 +434,6 @@ export default function SettingsPage() {
                 <label className={`text-sm font-medium ${theme.muted}`}>University</label>
                 <motion.div
                   whileHover={{ scale: 1.02 }}
-                  whileFocus={{ scale: 1.02 }}
                 >
                   <Input 
                     name="university"
@@ -442,7 +452,6 @@ export default function SettingsPage() {
                 <label className={`text-sm font-medium ${theme.muted}`}>Major</label>
                 <motion.div
                   whileHover={{ scale: 1.02 }}
-                  whileFocus={{ scale: 1.02 }}
                 >
                   <Input 
                     name="major"
@@ -470,7 +479,6 @@ export default function SettingsPage() {
                   onChange={handleInputChange}
                   rows={4}
                   whileHover={{ scale: 1.01 }}
-                  whileFocus={{ scale: 1.01 }}
                   placeholder="Write a short intro about yourself (optional)"
                   className={`w-full rounded-md border p-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all ${theme.input}`}
                 />

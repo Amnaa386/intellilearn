@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
@@ -11,7 +12,7 @@ load_dotenv()
 from app.core.config import settings
 from app.core.database import connect_to_database, close_database_connection
 from app.core.redis import connect_to_redis, close_redis_connection
-from app.routers import auth, chat, notes, quiz, analytics, admin, upload, user
+from app.routers import auth, chat, notes, quiz, analytics, admin, upload, user, presentations
 from app.middleware.rate_limiter import RateLimiterMiddleware
 from app.middleware.error_handler import add_exception_handlers
 
@@ -64,6 +65,8 @@ app.include_router(quiz.router, prefix="/api/quiz", tags=["Quiz"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(upload.router, prefix="/api/upload", tags=["Upload"])
+app.include_router(presentations.router, prefix="/api/presentations", tags=["Presentations"])
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 @app.get("/")
 async def root():

@@ -2,11 +2,14 @@
 
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Cpu, File as FileIcon, Image as ImageIcon, Music } from 'lucide-react';
+import { Check, Copy, Cpu, File as FileIcon, Image as ImageIcon, Music, Square, Volume2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StructuredLessonMessage from './StructuredLessonMessage';
 import { cn } from '@/lib/utils';
+
+let activeSpeechToken = null;
+let activeSpeechStop = null;
 
 function formatMsgTime(ts) {
   try {
@@ -23,6 +26,11 @@ export default function MessageBubble({ message, isDarkMode = true }) {
   const hasPack = Boolean(message.learningPack);
   const [userName, setUserName] = React.useState('');
   const [userAvatar, setUserAvatar] = React.useState('');
+  const [isCopied, setIsCopied] = React.useState(false);
+  const [isSpeaking, setIsSpeaking] = React.useState(false);
+  const speechTokenRef = React.useRef(`msg-${message?.id || Math.random().toString(36).slice(2)}`);
+  const isCancelledRef = React.useRef(false);
+  const chunkTimeoutRef = React.useRef(null);
 
   const sanitizeAvatar = React.useCallback((avatar) => {
     if (typeof avatar !== 'string') return '';
@@ -68,12 +76,201 @@ export default function MessageBubble({ message, isDarkMode = true }) {
     return [];
   }, [message?.attachments, message?.attachment]);
 
+  const readAloudText = React.useMemo(() => {
+    const raw = String(message?.content || '');
+    const normalized = raw
+      .replace(/```[\s\S]*?```/g, ' code block ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
+      .replace(/\bhttps?:\/\/\S+/gi, ' link ')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, ' ')
+      .replace(/\r/g, '\n')
+      .replace(/[•◦▪]/g, '-')
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/__(.*?)__/g, '$1')
+      .replace(/_(.*?)_/g, '$1')
+      .replace(/^\s*\d+\.\s+/gm, ' ')
+      .replace(/#{1,6}\s*/g, '')
+      .replace(/[>~]/g, ' ');
+
+    const lines = normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => Boolean(line) && !/^[=\-]{3,}$/.test(line));
+
+    // Convert list-like lines to explicit "Point N" phrasing.
+    let point = 1;
+    const spokenLines = lines.map((line) => {
+      const looksLikeListItem =
+        /^[\-*]\s+/.test(line) ||
+        /^([A-Za-z ]+:\s*)$/.test(line) ||
+        /^(key concepts|important points|quick revision|answers|practice questions)/i.test(line);
+      if (looksLikeListItem) {
+        const text = line.replace(/^[\-*]\s+/, '').trim();
+        if (!text) return '';
+        const out = `Point ${point}. ${text}`;
+        point += 1;
+        return out;
+      }
+      return /[.!?]$/.test(line) ? line : `${line}.`;
+    }).filter(Boolean);
+
+    return spokenLines
+      .map((line) => line.replace(/[ \t]+/g, ' ').replace(/\.{2,}/g, '.').trim())
+      .filter(Boolean)
+      .join('\n')
+      .replace(/\b(\w+)(\s+\1\b){2,}/gi, '$1') // collapse accidental repeated words
+      .trim();
+  }, [message?.content]);
+
+  const speechChunks = React.useMemo(() => {
+    if (!readAloudText) return [];
+    const chunks = [];
+    const maxChars = 90;
+    const maxWords = 16;
+
+    const lines = readAloudText
+      .replace(/\s*\n+\s*/g, '\n')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const pushByWords = (text) => {
+      const words = text.split(/\s+/).filter(Boolean);
+      if (!words.length) return;
+      let currentWords = [];
+      words.forEach((w) => {
+        const candidateWords = [...currentWords, w];
+        const candidate = candidateWords.join(' ');
+        if (candidate.length > maxChars || candidateWords.length > maxWords) {
+          if (currentWords.length) chunks.push(currentWords.join(' '));
+          currentWords = [w];
+        } else {
+          currentWords = candidateWords;
+        }
+      });
+      if (currentWords.length) chunks.push(currentWords.join(' '));
+    };
+
+    lines.forEach((line) => {
+      if (line.length <= maxChars && line.split(/\s+/).length <= maxWords) {
+        chunks.push(line);
+      } else {
+        line
+          .split(/,\s+/)
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .forEach((part) => pushByWords(part));
+      }
+    });
+
+    return chunks.length ? chunks : [readAloudText];
+  }, [readAloudText]);
+
   const getAttachmentKind = React.useCallback((type) => {
     const rawType = String(type || '').toLowerCase();
     if (rawType.includes('image')) return 'image';
     if (rawType.includes('audio')) return 'audio';
     return 'file';
   }, []);
+
+  const handleCopy = async () => {
+    const text = String(message?.content || '').trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 1400);
+    } catch {
+      // no-op fallback
+    }
+  };
+
+  const stopSpeaking = React.useCallback(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    isCancelledRef.current = true;
+    if (chunkTimeoutRef.current) {
+      clearTimeout(chunkTimeoutRef.current);
+      chunkTimeoutRef.current = null;
+    }
+    if (activeSpeechToken === speechTokenRef.current) {
+      activeSpeechToken = null;
+      activeSpeechStop = null;
+    }
+    setIsSpeaking(false);
+  }, []);
+
+  const handleListen = React.useCallback(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (!speechChunks.length) return;
+
+    if (isSpeaking) {
+      stopSpeaking();
+      return;
+    }
+
+    if (activeSpeechStop && activeSpeechToken && activeSpeechToken !== speechTokenRef.current) {
+      activeSpeechStop();
+    }
+
+    activeSpeechToken = speechTokenRef.current;
+    activeSpeechStop = stopSpeaking;
+    isCancelledRef.current = false;
+    window.speechSynthesis.cancel();
+    setIsSpeaking(true);
+
+    const speakChunk = (index) => {
+      if (isCancelledRef.current || activeSpeechToken !== speechTokenRef.current) {
+        setIsSpeaking(false);
+        return;
+      }
+      if (index >= speechChunks.length) {
+        setIsSpeaking(false);
+        if (activeSpeechToken === speechTokenRef.current) {
+          activeSpeechToken = null;
+          activeSpeechStop = null;
+        }
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(speechChunks[index]);
+      utterance.rate = 0.98;
+      utterance.pitch = 1;
+      let hasAdvanced = false;
+      const advanceOnce = () => {
+        if (hasAdvanced) return;
+        hasAdvanced = true;
+        if (chunkTimeoutRef.current) {
+          clearTimeout(chunkTimeoutRef.current);
+          chunkTimeoutRef.current = null;
+        }
+        speakChunk(index + 1);
+      };
+      utterance.onend = advanceOnce;
+      utterance.onerror = () => {
+        advanceOnce();
+      };
+      window.speechSynthesis.speak(utterance);
+
+      // Safari can get stuck repeating a token; force-advance safety timeout.
+      chunkTimeoutRef.current = setTimeout(() => {
+        window.speechSynthesis.cancel();
+        advanceOnce();
+      }, 16000);
+    };
+
+    speakChunk(0);
+  }, [isSpeaking, speechChunks, stopSpeaking]);
+
+  React.useEffect(() => {
+    return () => {
+      if (activeSpeechToken === speechTokenRef.current) {
+        stopSpeaking();
+      }
+    };
+  }, [stopSpeaking]);
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -180,6 +377,38 @@ export default function MessageBubble({ message, isDarkMode = true }) {
           {hasPack ? (
             <div className={cn(message.content ? `mt-4 border-t ${isDarkMode ? 'border-slate-600/50' : 'border-slate-200'} pt-4` : '')}>
               <StructuredLessonMessage pack={message.learningPack} />
+            </div>
+          ) : null}
+          {!isUser && message.content ? (
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleCopy}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors',
+                  isDarkMode
+                    ? 'border-slate-600/60 text-slate-300 hover:bg-slate-700/50'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-100',
+                )}
+                aria-label="Copy message"
+              >
+                {isCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {isCopied ? 'Copied' : 'Copy'}
+              </button>
+              <button
+                type="button"
+                onClick={handleListen}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors',
+                  isDarkMode
+                    ? 'border-slate-600/60 text-slate-300 hover:bg-slate-700/50'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-100',
+                )}
+                aria-label={isSpeaking ? 'Stop listening' : 'Listen to message'}
+              >
+                {isSpeaking ? <Square className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
+                {isSpeaking ? 'Stop' : 'Listen'}
+              </button>
             </div>
           ) : null}
           <p className={`mt-2 text-xs ${isUser ? 'text-blue-100' : isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{formatMsgTime(message.timestamp)}</p>

@@ -1,14 +1,19 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
-
-import { handleUnauthorized } from '@/lib/tutorApi';
 import { buildApiCacheKey, clearInflightRequest, getCachedValue, getInflightRequest, invalidateApiCacheByPath, setCachedValue, setInflightRequest } from '@/lib/apiCache';
 
-function getAccessToken() {
-  return localStorage.getItem('intellilearn_access_token') || '';
+function handleUnauthorized() {
+  try {
+    localStorage.removeItem('intellilearn_access_token');
+    localStorage.removeItem('intellilearn_refresh_token');
+    localStorage.removeItem('intellilearn_user');
+  } catch {
+    // ignore
+  }
+  if (typeof window !== 'undefined') window.location.href = '/auth/login';
 }
 
-async function quizFetch(path, options = {}) {
-  const token = getAccessToken();
+async function apiFetch(path, options = {}) {
+  const token = localStorage.getItem('intellilearn_access_token') || '';
   const method = String(options.method || 'GET').toUpperCase();
   const cacheTTL = Number(options.cacheTTL || 0);
   const bypassCache = Boolean(options.bypassCache);
@@ -56,64 +61,25 @@ async function quizFetch(path, options = {}) {
   return run();
 }
 
-export async function generateQuizFromChat(sessionId, mode = 'mcq') {
-  const data = await quizFetch('/api/quiz/generate/from-chat', {
+export function getPresentations(page = 1, limit = 100) {
+  return apiFetch(`/api/presentations/?page=${page}&limit=${limit}`, { method: 'GET', cacheTTL: 45000 });
+}
+
+export function createPresentation(payload) {
+  return apiFetch('/api/presentations', {
     method: 'POST',
-    body: JSON.stringify({ sessionId, mode }),
+    body: JSON.stringify(payload),
+  }).then((data) => {
+    invalidateApiCacheByPath('/api/presentations');
+    return data;
   });
-  invalidateApiCacheByPath('/api/quiz/');
-  return data;
 }
 
-export async function generateQuizFromTopic({
-  topic,
-  outline = '',
-  questionCount = 6,
-  difficulty = 'medium',
-  types = ['mcq'],
-}) {
-  const mergedTopic = outline?.trim()
-    ? `${topic}\n\nUse this outline/context:\n${outline.trim()}`
-    : topic;
-
-  const data = await quizFetch('/api/quiz/generate', {
-    method: 'POST',
-    body: JSON.stringify({
-      source: 'topic',
-      topic: mergedTopic,
-      questionCount,
-      difficulty,
-      types,
-    }),
+export function deletePresentation(presentationId) {
+  return apiFetch(`/api/presentations/${presentationId}`, {
+    method: 'DELETE',
+  }).then((data) => {
+    invalidateApiCacheByPath('/api/presentations');
+    return data;
   });
-  invalidateApiCacheByPath('/api/quiz/');
-  return data;
-}
-
-export async function getUserQuizzes({ page = 1, limit = 20, completed } = {}) {
-  const params = new URLSearchParams({
-    page: String(page),
-    limit: String(limit),
-  });
-  if (typeof completed === 'boolean') {
-    params.set('completed', String(completed));
-  }
-  return quizFetch(`/api/quiz/?${params.toString()}`, { method: 'GET', cacheTTL: 30000 });
-}
-
-export async function getQuizById(quizId) {
-  return quizFetch(`/api/quiz/${encodeURIComponent(quizId)}`, { method: 'GET', cacheTTL: 30000 });
-}
-
-export async function submitQuizAttempt({ quizId, answers = {}, writtenAnswers = {} }) {
-  const data = await quizFetch(`/api/quiz/${encodeURIComponent(quizId)}/submit`, {
-    method: 'POST',
-    body: JSON.stringify({
-      quizId,
-      answers,
-      writtenAnswers,
-    }),
-  });
-  invalidateApiCacheByPath('/api/quiz/');
-  return data;
 }

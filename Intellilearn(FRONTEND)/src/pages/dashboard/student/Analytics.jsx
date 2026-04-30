@@ -249,6 +249,51 @@ export default function AnalyticsPage() {
     },
   ];
 
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#0a0f2c] space-y-8">
+        <div className="space-y-3">
+          <div className="h-9 w-80 animate-pulse rounded bg-white/10" />
+          <div className="h-4 w-56 animate-pulse rounded bg-white/5" />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[0, 1, 2, 3].map((idx) => (
+            <div key={idx} className="rounded-[2rem] border border-white/5 bg-[#0d1333] p-6">
+              <div className="h-12 w-12 animate-pulse rounded-2xl bg-white/10" />
+              <div className="mt-4 h-3 w-28 animate-pulse rounded bg-white/10" />
+              <div className="mt-3 h-7 w-16 animate-pulse rounded bg-white/5" />
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-8">
+            <div className="h-6 w-52 animate-pulse rounded bg-white/10" />
+            <div className="mt-2 h-3 w-64 animate-pulse rounded bg-white/5" />
+            <div className="mt-8 h-[300px] animate-pulse rounded-2xl bg-white/5" />
+          </div>
+          <div className="space-y-8">
+            <div className="rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-8">
+              <div className="h-6 w-32 animate-pulse rounded bg-white/10" />
+              <div className="mt-6 space-y-4">
+                {[0, 1, 2, 3].map((idx) => (
+                  <div key={idx} className="h-3 animate-pulse rounded bg-white/5" />
+                ))}
+              </div>
+            </div>
+            <div className="rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-8">
+              <div className="h-6 w-44 animate-pulse rounded bg-white/10" />
+              <div className="mt-6 space-y-4">
+                {[0, 1, 2].map((idx) => (
+                  <div key={idx} className="h-10 animate-pulse rounded-xl bg-white/5" />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0f2c] space-y-8">
       
@@ -281,12 +326,6 @@ export default function AnalyticsPage() {
           {error}
         </div>
       ) : null}
-      {isLoading ? (
-        <div className="rounded-2xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
-          Loading live analytics...
-        </div>
-      ) : null}
-
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         {summaryCards.map((card, i) => (

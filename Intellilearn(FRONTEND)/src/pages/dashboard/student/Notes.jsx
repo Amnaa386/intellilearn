@@ -25,7 +25,7 @@ const GENERATED_NOTE_GUARD_KEY = 'intellilearn_last_generated_note_guard';
 export default function NotesPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { generatedTopic, generatedNotesContent, fromChatSessionId } = location.state || {};
+  const { generatedTopic, generatedNotesContent, fromChatSessionId, successMessage } = location.state || {};
   
   const [isGenerating, setIsGenerating] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -34,6 +34,7 @@ export default function NotesPage() {
   const [copied, setCopied] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [flashMessage, setFlashMessage] = useState(successMessage || '');
   const generateTimeoutRef = useRef(null);
 
   const selectedNote = notesLibrary.find((note) => note.id === selectedNoteId) || null;
@@ -117,6 +118,18 @@ export default function NotesPage() {
     setNotesLibrary((prev) => [note, ...prev]);
     if (openAfterCreate) setSelectedNoteId(note.id);
   };
+
+  useEffect(() => {
+    if (!successMessage) return;
+    navigate(location.pathname, { replace: true, state: { ...location.state, successMessage: undefined } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [successMessage]);
+
+  useEffect(() => {
+    if (!flashMessage) return undefined;
+    const id = setTimeout(() => setFlashMessage(''), 2200);
+    return () => clearTimeout(id);
+  }, [flashMessage]);
 
   useEffect(() => {
     const loadNotes = async () => {
@@ -369,9 +382,29 @@ Understanding ${topic} is essential for academic success and practical applicati
 
   if (isInitialLoading) {
     return (
-      <div className="min-h-[60vh] flex flex-col items-center justify-center space-y-4">
-        <div className="w-10 h-10 rounded-full border-2 border-blue-500/30 border-t-blue-400 animate-spin" />
-        <p className="text-sm text-slate-400">Loading your notes...</p>
+      <div className="mx-auto max-w-6xl py-8 space-y-5">
+        <div>
+          <div className="h-8 w-56 animate-pulse rounded bg-white/10" />
+          <div className="mt-2 h-4 w-72 animate-pulse rounded bg-white/5" />
+        </div>
+        <div className="space-y-6">
+          {[0, 1].map((groupIdx) => (
+            <div key={groupIdx}>
+              <div className="mb-3 h-10 w-56 animate-pulse rounded-xl bg-white/10" />
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {[0, 1, 2].map((idx) => (
+                  <div key={`${groupIdx}-${idx}`} className="rounded-2xl border border-slate-700/60 bg-[#0d1333] p-5">
+                    <div className="h-3 w-28 animate-pulse rounded bg-white/10" />
+                    <div className="mt-3 h-5 w-52 animate-pulse rounded bg-white/10" />
+                    <div className="mt-2 h-4 w-full animate-pulse rounded bg-white/5" />
+                    <div className="mt-2 h-4 w-10/12 animate-pulse rounded bg-white/5" />
+                    <div className="mt-4 h-3 w-36 animate-pulse rounded bg-white/5" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -403,6 +436,9 @@ Understanding ${topic} is essential for academic success and practical applicati
       >
         <motion.div variants={itemVariants} className="mb-6">
           <h2 className="text-2xl font-bold text-white">Your Notes Library</h2>
+          {flashMessage ? (
+            <p className="mt-2 text-sm text-emerald-400">{flashMessage}</p>
+          ) : null}
           <p className="text-slate-400 text-sm mt-1">
             Sare generated notes cards me save hain. Kisi bhi card pe click karo aur full notes open kar lo.
           </p>

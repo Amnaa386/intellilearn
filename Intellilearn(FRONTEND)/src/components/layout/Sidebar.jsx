@@ -4,7 +4,7 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import BrandLogo from '@/components/branding/BrandLogo';
-import { 
+import {
   Home, 
   BookOpen, 
   BarChart3, 
@@ -15,7 +15,8 @@ import {
   Zap,
   HelpCircle,
   LayoutDashboard,
-  Bell
+  Bell,
+  Presentation
 } from 'lucide-react';
 
 export default function Sidebar({ isOpen, userRole }) {
@@ -56,6 +57,7 @@ export default function Sidebar({ isOpen, userRole }) {
         { icon: Zap, label: 'AI Tutor', href: '/dashboard/student/tutor' },
         { icon: FileText, label: 'Quizzes', href: '/dashboard/student/quiz' },
         { icon: FileText, label: 'Notes', href: '/dashboard/student/notes' },
+        { icon: Presentation, label: 'Presentations', href: '/dashboard/student/presentations' },
         { icon: BarChart3, label: 'Analytics', href: '/dashboard/student/analytics' },
         { icon: Settings, label: 'Settings', href: '/dashboard/student/settings' },
       ];
@@ -66,6 +68,7 @@ export default function Sidebar({ isOpen, userRole }) {
       { icon: Zap, label: 'AI Tutor', href: '/dashboard/student/tutor' },
       { icon: FileText, label: 'Quizzes', href: '/dashboard/student/quiz' },
       { icon: FileText, label: 'Notes', href: '/dashboard/student/notes' },
+      { icon: Presentation, label: 'Presentations', href: '/dashboard/student/presentations' },
       { icon: BarChart3, label: 'Analytics', href: '/dashboard/student/analytics' },
       { icon: Settings, label: 'Settings', href: '/dashboard/student/settings' },
     ];

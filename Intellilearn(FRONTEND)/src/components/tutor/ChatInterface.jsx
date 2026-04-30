@@ -8,11 +8,22 @@ import MessageBubble from './MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { askTutor, autoTitleTutorSession, updateTutorSessionTitle, handleUnauthorized } from '@/lib/tutorApi';
+import { createPresentation } from '@/lib/presentationsApi';
 
 export default function ChatInterface({ messages, setMessages, isDarkMode = true, sessionIdRef, autoTitleNextMessage = false, onAutoTitleConsumed = null }) {
+  const PPT_THEMES = [
+    { id: 'classic', label: 'Classic', description: 'Clean light slides for formal study decks.' },
+    { id: 'modern', label: 'Modern', description: 'Dark modern style with crisp contrast.' },
+    { id: 'premium', label: 'Premium', description: 'Bold gradient look for AI-like presentation feel.' },
+  ];
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
+  const [isGeneratingPpt, setIsGeneratingPpt] = useState(false);
+  const [isPreparingQuiz, setIsPreparingQuiz] = useState(false);
+  const [showPptThemeModal, setShowPptThemeModal] = useState(false);
+  const [selectedPptTheme, setSelectedPptTheme] = useState('modern');
+  const [successMessage, setSuccessMessage] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isRequestingMic, setIsRequestingMic] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
@@ -23,6 +34,43 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   const recognitionRef = useRef(null);
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
+  const isActionLocked = isLoading || isGeneratingNotes || isGeneratingPpt || isPreparingQuiz;
+  const actionStatusText = isGeneratingNotes
+    ? 'Generating notes...'
+    : isGeneratingPpt
+      ? 'Generating presentation...'
+      : isPreparingQuiz
+        ? 'Preparing quiz...'
+        : isLoading
+          ? 'Getting AI response...'
+          : '';
+
+  const derivePptTitleFromMarkdown = (markdown = '', fallback = 'AI Presentation') => {
+    const lines = String(markdown)
+      .replace(/\r/g, '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !/^[=\-]{3,}$/.test(line));
+
+    for (const line of lines) {
+      const cleaned = line
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/^[-*]\s+/, '')
+        .replace(/^\d+\.\s+/, '')
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/_(.*?)_/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^(title|slide title)\s*:\s*/i, '')
+        .trim();
+      if (cleaned.length >= 8) {
+        return cleaned.slice(0, 120);
+      }
+    }
+
+    return fallback;
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -31,6 +79,12 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (!successMessage) return undefined;
+    const id = setTimeout(() => setSuccessMessage(''), 1800);
+    return () => clearTimeout(id);
+  }, [successMessage]);
 
   useEffect(() => {
     const SpeechRecognition =
@@ -298,6 +352,7 @@ ${convo}`;
           fromChatSessionId: sessionIdRef?.current || null,
           generatedNotesContent: notesContent,
           type: 'detailed',
+          successMessage: 'Notes generated successfully.',
         },
       });
     } catch (err) {
@@ -309,15 +364,80 @@ ${convo}`;
 
   const handleGenerateQuizFromChat = () => {
     const activeSessionId = sessionIdRef?.current || null;
-    if (!activeSessionId) {
+    if (!activeSessionId || isPreparingQuiz) {
       setApiError('Start or continue a chat first, then generate a quiz.');
       return;
     }
-    navigate('/dashboard/student/quiz', {
-      state: {
-        fromChatSessionId: activeSessionId,
-      },
-    });
+    setApiError('');
+    setIsPreparingQuiz(true);
+    setSuccessMessage('Quiz ready. Opening quiz page...');
+    setTimeout(() => {
+      navigate('/dashboard/student/quiz', {
+        state: {
+          fromChatSessionId: activeSessionId,
+          successMessage: 'Quiz loaded from your chat context.',
+        },
+      });
+      setIsPreparingQuiz(false);
+    }, 450);
+  };
+
+  const handleGeneratePptFromChat = async (theme = 'modern') => {
+    if (messages.length < 2 || isGeneratingPpt) return;
+    try {
+      setApiError('');
+      setIsGeneratingPpt(true);
+      setShowPptThemeModal(false);
+      const convo = messages
+        .filter((m) => m?.content)
+        .slice(-10)
+        .map((m) => {
+          const text = (m.content || '').replace(/\s+/g, ' ').trim();
+          const compact = text.length > 240 ? `${text.slice(0, 240)}...` : text;
+          return `${m.type === 'user' ? 'Student' : 'Tutor'}: ${compact}`;
+        })
+        .join('\n\n');
+
+      const firstUser = messages.find((m) => m.type === 'user')?.content || 'Tutor Conversation';
+      const topic = firstUser.length > 80 ? `${firstUser.slice(0, 80).trim()}...` : firstUser;
+      let prompt = `Create presentation-ready markdown content from this tutor conversation.
+Keep sections concise and clear for slides:
+- Title
+- 5 to 8 slide sections using headings
+- Bullet points under each section
+- Final recap
+
+Conversation:
+${convo}`;
+      const MAX_PROMPT_LEN = 1800;
+      if (prompt.length > MAX_PROMPT_LEN) prompt = `${prompt.slice(0, MAX_PROMPT_LEN)}...`;
+
+      const ai = await askTutor(prompt, sessionIdRef?.current || null);
+      const pptContent = ai?.message || '';
+      if (!pptContent.trim()) throw new Error('Unable to generate presentation content from conversation.');
+      const aiGeneratedTitle = derivePptTitleFromMarkdown(
+        pptContent,
+        topic ? `AI Presentation on ${topic}` : 'AI Presentation',
+      );
+
+      const created = await createPresentation({
+        title: aiGeneratedTitle,
+        topic,
+        content: pptContent,
+        theme,
+      });
+
+      navigate('/dashboard/student/presentations', {
+        state: {
+          createdPresentationId: created?.id || null,
+          successMessage: 'Presentation generated successfully.',
+        },
+      });
+    } catch (err) {
+      setApiError(err?.message || 'Failed to generate presentation from chat.');
+    } finally {
+      setIsGeneratingPpt(false);
+    }
   };
 
   const handleSendMessage = async (e) => {
@@ -417,7 +537,7 @@ ${convo}`;
   };
 
   return (
-    <div className={`flex flex-col h-full rounded-xl overflow-hidden border ${isDarkMode ? 'bg-gradient-to-br from-slate-800/50 to-slate-900/50 border-slate-700/50' : 'bg-white border-slate-200 shadow-sm'}`}>
+    <div className={`relative flex flex-col h-full rounded-xl overflow-hidden border ${isDarkMode ? 'bg-gradient-to-br from-slate-800/50 to-slate-900/50 border-slate-700/50' : 'bg-white border-slate-200 shadow-sm'}`}>
       {/* Header */}
       <div className={`p-6 border-b ${isDarkMode ? 'border-slate-700/50 bg-gradient-to-r from-slate-800/50 to-slate-900/50' : 'border-slate-200 bg-slate-50'}`}>
         <h1 className={`text-2xl font-bold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>Intelli AI Tutor</h1>
@@ -427,6 +547,9 @@ ${convo}`;
         </p>
         {apiError ? (
           <p className="mt-2 text-xs text-amber-500">{apiError}</p>
+        ) : null}
+        {successMessage ? (
+          <p className="mt-2 text-xs text-emerald-400">{successMessage}</p>
         ) : null}
       </div>
 
@@ -519,7 +642,7 @@ ${convo}`;
               variant="outline"
               type="button"
               onClick={handleAttachmentButtonClick}
-              disabled={isUploadingAttachment}
+              disabled={isUploadingAttachment || isActionLocked}
               className={isDarkMode ? 'border-slate-600 text-slate-400 hover:bg-slate-800/50 disabled:opacity-60' : 'border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-60'}
             >
               <Paperclip className="w-4 h-4" />
@@ -529,6 +652,7 @@ ${convo}`;
               variant="outline"
               type="button"
               onClick={handleVoiceInput}
+              disabled={isActionLocked}
               className={
                 isListening
                   ? (isDarkMode
@@ -568,6 +692,16 @@ ${convo}`;
               <HelpCircle className="w-4 h-4 mr-2" />
               Generate Quiz
             </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={messages.length < 2 || isGeneratingPpt || isActionLocked}
+              onClick={() => setShowPptThemeModal(true)}
+              className={isDarkMode ? 'border-slate-600 text-slate-300 hover:bg-slate-800/50' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}
+            >
+              <Presentation className="w-4 h-4 mr-2" />
+              {isGeneratingPpt ? 'Generating PPT...' : 'Generate PPT'}
+            </Button>
           </div>
 
           {/* Input */}
@@ -582,7 +716,7 @@ ${convo}`;
             />
             <Button
               type="submit"
-              disabled={isLoading || (!input.trim() && attachedFiles.length === 0) || isUploadingAttachment}
+              disabled={isActionLocked || (!input.trim() && attachedFiles.length === 0) || isUploadingAttachment}
               size="icon"
               className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
             >
@@ -684,6 +818,89 @@ ${convo}`;
           ))}
         </div>
       </div>
+
+      <AnimatePresence>
+        {showPptThemeModal ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              className={isDarkMode ? 'w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-900 p-5' : 'w-full max-w-xl rounded-2xl border border-slate-300 bg-white p-5'}
+            >
+              <div className="mb-4 flex items-start justify-between">
+                <div>
+                  <h3 className={isDarkMode ? 'text-lg font-semibold text-slate-100' : 'text-lg font-semibold text-slate-900'}>Select PPT theme</h3>
+                  <p className={isDarkMode ? 'mt-1 text-sm text-slate-400' : 'mt-1 text-sm text-slate-600'}>
+                    Choose style before generating your presentation.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPptThemeModal(false)}
+                  className={isDarkMode ? 'rounded-md p-1 text-slate-300 hover:bg-slate-800' : 'rounded-md p-1 text-slate-600 hover:bg-slate-100'}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-3">
+                {PPT_THEMES.map((theme) => {
+                  const active = selectedPptTheme === theme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      onClick={() => setSelectedPptTheme(theme.id)}
+                      className={`rounded-xl border px-3 py-3 text-left transition ${
+                        active
+                          ? 'border-blue-500 bg-blue-500/10'
+                          : isDarkMode
+                            ? 'border-slate-700 hover:border-slate-500'
+                            : 'border-slate-300 hover:border-slate-400'
+                      }`}
+                    >
+                      <p className={isDarkMode ? 'text-sm font-semibold text-slate-100' : 'text-sm font-semibold text-slate-900'}>{theme.label}</p>
+                      <p className={isDarkMode ? 'mt-1 text-xs text-slate-400' : 'mt-1 text-xs text-slate-600'}>{theme.description}</p>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPptThemeModal(false)}
+                  className={isDarkMode ? 'rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800' : 'rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-100'}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleGeneratePptFromChat(selectedPptTheme)}
+                  disabled={isGeneratingPpt}
+                  className="rounded-lg bg-gradient-to-r from-blue-500 to-purple-600 px-3 py-2 text-sm font-medium text-white hover:from-blue-600 hover:to-purple-700 disabled:opacity-60"
+                >
+                  {isGeneratingPpt ? 'Generating...' : 'Generate PPT'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      {isActionLocked ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/60 backdrop-blur-[1px]">
+          <div className="flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 shadow-xl">
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-400/30 border-t-blue-400" />
+            <span>{actionStatusText || 'Please wait...'}</span>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

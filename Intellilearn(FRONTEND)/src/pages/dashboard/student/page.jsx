@@ -99,6 +99,7 @@ export default function StudentDashboard() {
   const [liveQuizStats, setLiveQuizStats] = useState(null);
   const [liveNotesStats, setLiveNotesStats] = useState(null);
   const [liveActivities, setLiveActivities] = useState([]);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(true);
 
   const slides = [
     { title: 'Introduction to AI', content: 'Artificial Intelligence is the simulation of human intelligence by machines.', explanation: 'Think of AI as a brain for computers. It helps them learn from data and make decisions just like we do!' },
@@ -125,6 +126,7 @@ export default function StudentDashboard() {
   useEffect(() => {
     let cancelled = false;
     const loadDashboardData = async () => {
+      setIsDashboardLoading(true);
       try {
         const [overviewRes, activityRes, chatRes, quizRes, notesRes] = await Promise.all([
           getUserAnalyticsOverview(),
@@ -142,6 +144,8 @@ export default function StudentDashboard() {
       } catch (err) {
         // Keep dashboard usable even if live fetch fails.
         console.error('Failed to load dashboard live stats:', err);
+      } finally {
+        if (!cancelled) setIsDashboardLoading(false);
       }
     };
     loadDashboardData();
@@ -246,6 +250,50 @@ export default function StudentDashboard() {
     }, 1000);
   };
 
+  if (isDashboardLoading) {
+    return (
+      <div className="min-h-screen bg-[#0a0f2c] space-y-10">
+        <section className="space-y-6">
+          <div className="h-10 w-96 animate-pulse rounded bg-white/10" />
+          <div className="h-4 w-72 animate-pulse rounded bg-white/5" />
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+            {[0, 1, 2, 3].map((idx) => (
+              <div key={idx} className="rounded-[2rem] border border-white/5 bg-[#0d1333] p-6">
+                <div className="h-12 w-12 animate-pulse rounded-2xl bg-white/10" />
+                <div className="mt-4 h-3 w-24 animate-pulse rounded bg-white/10" />
+                <div className="mt-2 h-8 w-20 animate-pulse rounded bg-white/5" />
+              </div>
+            ))}
+          </div>
+        </section>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+          <div className="lg:col-span-2 rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-6 h-[600px]">
+            <div className="h-6 w-44 animate-pulse rounded bg-white/10" />
+            <div className="mt-5 space-y-3">
+              {[0, 1, 2].map((idx) => (
+                <div key={idx} className="h-12 animate-pulse rounded-xl bg-white/5" />
+              ))}
+            </div>
+          </div>
+          <div className="space-y-8">
+            <div className="rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-6">
+              <div className="h-6 w-28 animate-pulse rounded bg-white/10" />
+              <div className="mt-4 space-y-3">
+                {[0, 1, 2, 3].map((idx) => (
+                  <div key={idx} className="h-16 animate-pulse rounded-2xl bg-white/5" />
+                ))}
+              </div>
+            </div>
+            <div className="rounded-[2.5rem] border border-white/5 bg-[#0d1333] p-6">
+              <div className="h-6 w-40 animate-pulse rounded bg-white/10" />
+              <div className="mt-4 h-24 animate-pulse rounded-2xl bg-white/5" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0f2c] space-y-10">
       
@@ -282,7 +330,11 @@ export default function StudentDashboard() {
                 <stat.icon className="w-6 h-6" />
               </div>
               <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-1">{stat.label}</p>
-              <p className="text-2xl font-black text-white tracking-tight">{stat.value}</p>
+              {isDashboardLoading ? (
+                <div className="mt-1 h-7 w-20 animate-pulse rounded bg-white/10" />
+              ) : (
+                <p className="text-2xl font-black text-white tracking-tight">{stat.value}</p>
+              )}
             </motion.div>
           ))}
         </div>
