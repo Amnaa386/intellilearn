@@ -18,6 +18,7 @@ const QuizPage = lazy(() => import('./pages/dashboard/student/quiz/page'));
 const TutorPage = lazy(() => import('./pages/dashboard/student/tutor/page'));
 const NotesPage = lazy(() => import('./pages/dashboard/student/Notes'));
 const PresentationsPage = lazy(() => import('./pages/dashboard/student/Presentations'));
+const VideoLecturesPage = lazy(() => import('./pages/dashboard/student/VideoLectures'));
 const VoiceLessonPage = lazy(() => import('./pages/dashboard/student/VoiceLesson'));
 const ExploreTopicsPage = lazy(() => import('./pages/dashboard/student/ExploreTopics'));
 const AnalyticsPage = lazy(() => import('./pages/dashboard/student/Analytics'));
@@ -137,6 +138,7 @@ function App() {
             <Route path="tutor" element={<TutorPage />} />
             <Route path="notes" element={<NotesPage />} />
             <Route path="presentations" element={<PresentationsPage />} />
+            <Route path="video-lectures" element={<VideoLecturesPage />} />
             <Route path="voice-lesson" element={<VoiceLessonPage />} />
             <Route path="modules" element={<ExploreTopicsPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />

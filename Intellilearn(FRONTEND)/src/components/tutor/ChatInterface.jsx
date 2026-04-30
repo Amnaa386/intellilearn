@@ -2,13 +2,14 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation, X, Image as ImageIcon, Music, File } from 'lucide-react';
+import { Send, Paperclip, Mic, Sparkles, FileText, HelpCircle, Presentation, X, Image as ImageIcon, Music, File, Video } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import MessageBubble from './MessageBubble';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { askTutor, autoTitleTutorSession, updateTutorSessionTitle, handleUnauthorized } from '@/lib/tutorApi';
 import { createPresentation } from '@/lib/presentationsApi';
+import { createVideoLecture } from '@/lib/videoLecturesApi';
 
 export default function ChatInterface({ messages, setMessages, isDarkMode = true, sessionIdRef, autoTitleNextMessage = false, onAutoTitleConsumed = null }) {
   const PPT_THEMES = [
@@ -20,9 +21,13 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingNotes, setIsGeneratingNotes] = useState(false);
   const [isGeneratingPpt, setIsGeneratingPpt] = useState(false);
+  const [isGeneratingVideoLecture, setIsGeneratingVideoLecture] = useState(false);
   const [isPreparingQuiz, setIsPreparingQuiz] = useState(false);
   const [showPptThemeModal, setShowPptThemeModal] = useState(false);
+  const [showVideoModal, setShowVideoModal] = useState(false);
   const [selectedPptTheme, setSelectedPptTheme] = useState('modern');
+  const [selectedVoiceStyle, setSelectedVoiceStyle] = useState('humanized');
+  const [selectedVoiceSpeed, setSelectedVoiceSpeed] = useState(1.0);
   const [successMessage, setSuccessMessage] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isRequestingMic, setIsRequestingMic] = useState(false);
@@ -34,11 +39,13 @@ export default function ChatInterface({ messages, setMessages, isDarkMode = true
   const recognitionRef = useRef(null);
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
-  const isActionLocked = isLoading || isGeneratingNotes || isGeneratingPpt || isPreparingQuiz;
+  const isActionLocked = isLoading || isGeneratingNotes || isGeneratingPpt || isPreparingQuiz || isGeneratingVideoLecture;
   const actionStatusText = isGeneratingNotes
     ? 'Generating notes...'
     : isGeneratingPpt
       ? 'Generating presentation...'
+      : isGeneratingVideoLecture
+        ? 'Generating video lecture...'
       : isPreparingQuiz
         ? 'Preparing quiz...'
         : isLoading
@@ -440,6 +447,60 @@ ${convo}`;
     }
   };
 
+  const handleGenerateVideoFromChat = async () => {
+    if (messages.length < 2 || isGeneratingVideoLecture) return;
+    try {
+      setApiError('');
+      setIsGeneratingVideoLecture(true);
+      setShowVideoModal(false);
+      const convo = messages
+        .filter((m) => m?.content)
+        .slice(-10)
+        .map((m) => {
+          const text = (m.content || '').replace(/\s+/g, ' ').trim();
+          const compact = text.length > 260 ? `${text.slice(0, 260)}...` : text;
+          return `${m.type === 'user' ? 'Student' : 'Tutor'}: ${compact}`;
+        })
+        .join('\n\n');
+
+      const firstUser = messages.find((m) => m.type === 'user')?.content || 'Tutor Conversation';
+      const topic = firstUser.length > 80 ? `${firstUser.slice(0, 80).trim()}...` : firstUser;
+      let prompt = `Create a clean spoken lecture script from this tutor conversation.
+Requirements:
+- 3 to 6 concise sections
+- conversational teaching tone
+- avoid markdown symbols
+- total length around 2 to 4 minutes speech
+
+Conversation:
+${convo}`;
+      const MAX_PROMPT_LEN = 1800;
+      if (prompt.length > MAX_PROMPT_LEN) prompt = `${prompt.slice(0, MAX_PROMPT_LEN)}...`;
+      const ai = await askTutor(prompt, sessionIdRef?.current || null);
+      const script = (ai?.message || '').replace(/\*\*/g, '').trim();
+      if (!script) throw new Error('Unable to generate lecture script from conversation.');
+      const title = derivePptTitleFromMarkdown(script, topic ? `Video Lecture on ${topic}` : 'AI Video Lecture');
+
+      await createVideoLecture({
+        title,
+        topic,
+        script,
+        voiceStyle: selectedVoiceStyle,
+        voiceSpeed: Number(selectedVoiceSpeed),
+      });
+
+      navigate('/dashboard/student/video-lectures', {
+        state: {
+          successMessage: 'Video lecture generated successfully.',
+        },
+      });
+    } catch (err) {
+      setApiError(err?.message || 'Failed to generate video lecture from chat.');
+    } finally {
+      setIsGeneratingVideoLecture(false);
+    }
+  };
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if ((!input.trim() && attachedFiles.length === 0) || isLoading) return;
@@ -702,6 +763,16 @@ ${convo}`;
               <Presentation className="w-4 h-4 mr-2" />
               {isGeneratingPpt ? 'Generating PPT...' : 'Generate PPT'}
             </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={messages.length < 2 || isGeneratingVideoLecture || isActionLocked}
+              onClick={() => setShowVideoModal(true)}
+              className={isDarkMode ? 'border-slate-600 text-slate-300 hover:bg-slate-800/50' : 'border-slate-300 text-slate-700 hover:bg-slate-100'}
+            >
+              <Video className="w-4 h-4 mr-2" />
+              {isGeneratingVideoLecture ? 'Generating Video...' : 'Generate Video Lecture'}
+            </Button>
           </div>
 
           {/* Input */}
@@ -887,6 +958,96 @@ ${convo}`;
                   className="rounded-lg bg-gradient-to-r from-blue-500 to-purple-600 px-3 py-2 text-sm font-medium text-white hover:from-blue-600 hover:to-purple-700 disabled:opacity-60"
                 >
                   {isGeneratingPpt ? 'Generating...' : 'Generate PPT'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
+        {showVideoModal ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              className={isDarkMode ? 'w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-900 p-5' : 'w-full max-w-xl rounded-2xl border border-slate-300 bg-white p-5'}
+            >
+              <div className="mb-4 flex items-start justify-between">
+                <div>
+                  <h3 className={isDarkMode ? 'text-lg font-semibold text-slate-100' : 'text-lg font-semibold text-slate-900'}>Video lecture settings</h3>
+                  <p className={isDarkMode ? 'mt-1 text-sm text-slate-400' : 'mt-1 text-sm text-slate-600'}>
+                    Choose voice style and speed.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowVideoModal(false)}
+                  className={isDarkMode ? 'rounded-md p-1 text-slate-300 hover:bg-slate-800' : 'rounded-md p-1 text-slate-600 hover:bg-slate-100'}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                {[
+                  { id: 'standard', label: 'Standard', description: 'Clear and stable AI voice.' },
+                  { id: 'humanized', label: 'Humanized AI', description: 'Softer pacing for natural lecture tone.' },
+                ].map((voice) => {
+                  const active = selectedVoiceStyle === voice.id;
+                  return (
+                    <button
+                      key={voice.id}
+                      type="button"
+                      onClick={() => setSelectedVoiceStyle(voice.id)}
+                      className={`rounded-xl border px-3 py-3 text-left transition ${
+                        active
+                          ? 'border-blue-500 bg-blue-500/10'
+                          : isDarkMode
+                            ? 'border-slate-700 hover:border-slate-500'
+                            : 'border-slate-300 hover:border-slate-400'
+                      }`}
+                    >
+                      <p className={isDarkMode ? 'text-sm font-semibold text-slate-100' : 'text-sm font-semibold text-slate-900'}>{voice.label}</p>
+                      <p className={isDarkMode ? 'mt-1 text-xs text-slate-400' : 'mt-1 text-xs text-slate-600'}>{voice.description}</p>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4">
+                <label className={isDarkMode ? 'mb-1 block text-xs text-slate-400' : 'mb-1 block text-xs text-slate-600'}>
+                  Voice Speed: {Number(selectedVoiceSpeed).toFixed(2)}x
+                </label>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="1.25"
+                  step="0.05"
+                  value={selectedVoiceSpeed}
+                  onChange={(e) => setSelectedVoiceSpeed(Number(e.target.value))}
+                  className="w-full"
+                />
+              </div>
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowVideoModal(false)}
+                  className={isDarkMode ? 'rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800' : 'rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-100'}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGenerateVideoFromChat}
+                  disabled={isGeneratingVideoLecture}
+                  className="rounded-lg bg-gradient-to-r from-blue-500 to-purple-600 px-3 py-2 text-sm font-medium text-white hover:from-blue-600 hover:to-purple-700 disabled:opacity-60"
+                >
+                  {isGeneratingVideoLecture ? 'Generating...' : 'Generate Video Lecture'}
                 </button>
               </div>
             </motion.div>

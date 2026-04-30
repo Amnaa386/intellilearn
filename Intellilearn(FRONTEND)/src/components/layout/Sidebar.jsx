@@ -16,7 +16,8 @@ import {
   HelpCircle,
   LayoutDashboard,
   Bell,
-  Presentation
+  Presentation,
+  Video
 } from 'lucide-react';
 
 export default function Sidebar({ isOpen, userRole }) {
@@ -58,6 +59,7 @@ export default function Sidebar({ isOpen, userRole }) {
         { icon: FileText, label: 'Quizzes', href: '/dashboard/student/quiz' },
         { icon: FileText, label: 'Notes', href: '/dashboard/student/notes' },
         { icon: Presentation, label: 'Presentations', href: '/dashboard/student/presentations' },
+        { icon: Video, label: 'Video Lectures', href: '/dashboard/student/video-lectures' },
         { icon: BarChart3, label: 'Analytics', href: '/dashboard/student/analytics' },
         { icon: Settings, label: 'Settings', href: '/dashboard/student/settings' },
       ];
@@ -69,6 +71,7 @@ export default function Sidebar({ isOpen, userRole }) {
       { icon: FileText, label: 'Quizzes', href: '/dashboard/student/quiz' },
       { icon: FileText, label: 'Notes', href: '/dashboard/student/notes' },
       { icon: Presentation, label: 'Presentations', href: '/dashboard/student/presentations' },
+      { icon: Video, label: 'Video Lectures', href: '/dashboard/student/video-lectures' },
       { icon: BarChart3, label: 'Analytics', href: '/dashboard/student/analytics' },
       { icon: Settings, label: 'Settings', href: '/dashboard/student/settings' },
     ];
