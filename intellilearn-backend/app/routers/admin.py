@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Query, Body
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, status, Depends, Query
 from fastapi.security import HTTPBearer
 from app.models.user import UserCreate, UserResponse, UserRole, UserStatus
 from app.services.auth_service import auth_service
 from app.services.analytics_service import analytics_service
 from app.core.security import get_current_admin
-from app.core.redis import increment_rate_limit
 import logging
 from datetime import datetime
 
@@ -17,8 +18,8 @@ async def get_all_users(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: str = Query(None),
-    role: UserRole = Query(None),
-    status: UserStatus = Query(None),
+    role: Optional[UserRole] = Query(None),
+    status: Optional[UserStatus] = Query(None),
     current_user: dict = Depends(get_current_admin)
 ):
     """Get all users with filtering and pagination"""
@@ -55,6 +56,8 @@ async def get_all_users(
             "limit": limit,
             "totalPages": (total + limit - 1) // limit
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting users: {e}")
         raise HTTPException(
@@ -166,10 +169,16 @@ async def get_user_by_id(user_id: str, current_user: dict = Depends(get_current_
         )
 
 @router.get("/overview")
-async def get_admin_overview(current_user: dict = Depends(get_current_admin)):
+async def get_admin_overview(
+    timeframe: str = Query("weekly", pattern="^(daily|weekly|monthly)$"),
+    current_user: dict = Depends(get_current_admin),
+):
     """Get admin dashboard overview"""
     try:
-        analytics = await analytics_service.get_admin_analytics()
+        timeframe = (timeframe or "weekly").lower()
+        if timeframe not in {"daily", "weekly", "monthly"}:
+            timeframe = "weekly"
+        analytics = await analytics_service.get_admin_analytics(timeframe=timeframe)
         return analytics.get("summary", {})
     except Exception as e:
         logger.error(f"Error getting admin overview: {e}")
@@ -179,10 +188,16 @@ async def get_admin_overview(current_user: dict = Depends(get_current_admin)):
         )
 
 @router.get("/analytics")
-async def get_system_analytics(current_user: dict = Depends(get_current_admin)):
+async def get_system_analytics(
+    timeframe: str = Query("weekly", pattern="^(daily|weekly|monthly)$"),
+    current_user: dict = Depends(get_current_admin),
+):
     """Get system-wide analytics"""
     try:
-        analytics = await analytics_service.get_admin_analytics()
+        timeframe = (timeframe or "weekly").lower()
+        if timeframe not in {"daily", "weekly", "monthly"}:
+            timeframe = "weekly"
+        analytics = await analytics_service.get_admin_analytics(timeframe=timeframe)
         return analytics
     except Exception as e:
         logger.error(f"Error getting system analytics: {e}")
@@ -192,10 +207,16 @@ async def get_system_analytics(current_user: dict = Depends(get_current_admin)):
         )
 
 @router.get("/ai-activity")
-async def get_ai_activity(current_user: dict = Depends(get_current_admin)):
+async def get_ai_activity(
+    timeframe: str = Query("weekly", pattern="^(daily|weekly|monthly)$"),
+    current_user: dict = Depends(get_current_admin),
+):
     """Get AI activity statistics"""
     try:
-        analytics = await analytics_service.get_admin_analytics()
+        timeframe = (timeframe or "weekly").lower()
+        if timeframe not in {"daily", "weekly", "monthly"}:
+            timeframe = "weekly"
+        analytics = await analytics_service.get_admin_analytics(timeframe=timeframe)
         return {
             "featureUsage": analytics.get("featureUsage", []),
             "dailyTraffic": analytics.get("dailyTraffic", [])
@@ -268,16 +289,9 @@ async def get_common_queries(current_user: dict = Depends(get_current_admin)):
     """Get common user queries"""
     try:
         insights = await analytics_service.get_system_insights()
+        live_queries = await analytics_service.get_common_queries(limit=7)
         return {
-            "queries": [
-                "Explain this PPT slide in simple terms",
-                "Create a quiz from chapter 4",
-                "Summarize this lesson into notes",
-                "Give me a 5-minute quick revision",
-                "Help me understand this concept",
-                "Generate practice questions",
-                "Create voice lesson on this topic"
-            ],
+            "queries": live_queries,
             "mostRequested": insights.get("mostRequestedTopic", "General study topics"),
             "commonStyle": insights.get("commonQueryStyle", "Educational explanations")
         }

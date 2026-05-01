@@ -19,11 +19,11 @@ export default function ProtectedRoute({ children, role }) {
   }
 
   if (role === 'admin') {
+    const emailMatchesIfConfigured = authorizedAdminEmail ? userEmail === authorizedAdminEmail : true;
     const isAuthorizedAdmin =
       userRole === 'admin' &&
       backendVerifiedAdmin &&
-      Boolean(authorizedAdminEmail) &&
-      userEmail === authorizedAdminEmail;
+      emailMatchesIfConfigured;
 
     if (!isAuthorizedAdmin) {
       localStorage.removeItem('intellilearn_role');

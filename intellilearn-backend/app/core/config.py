@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     
     # Admin
     ADMIN_EMAIL: str = "admin@intellilearn.com"
+    ADMIN_PASSWORD: str = ""
+    ADMIN_NAME: str = "Platform Administrator"
     
     class Config:
         env_file = ".env"
